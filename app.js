@@ -245,6 +245,12 @@ const ui = {
   anaTime: $("anaTime"),
   anaList: $("anaList"),
   anaInfo: $("anaInfo"),
+  imageDialog: $("imageDialog"),
+  imageCanvas: $("imageCanvas"),
+  imageMsg: $("imageMsg"),
+  imageFlipped: $("imageFlipped"),
+  imageUse: $("imageUse"),
+  imageFile: $("imageFile"),
 };
 const ctx = ui.canvas.getContext("2d");
 let sq = 0;  // square size in canvas pixels
@@ -324,6 +330,22 @@ function buildUi() {
   ui.anaLines.onchange = positionEdited;
   ui.anaTime.onchange = positionEdited;
   ui.anaList.addEventListener("mouseleave", () => { hoverLine = null; redraw(); });
+  $("editFromImage").onclick = () => ui.imageFile.click();
+  ui.imageFile.onchange = () => {
+    readFromImage(ui.imageFile.files[0]);
+    ui.imageFile.value = "";
+  };
+  document.addEventListener("paste", onPaste);
+  document.addEventListener("dragover", onDragOver);
+  document.addEventListener("dragleave", e => { if (!e.relatedTarget) document.body.classList.remove("dropping"); });
+  document.addEventListener("drop", onDrop);
+  ui.imageCanvas.addEventListener("pointerdown", onImagePress);
+  ui.imageCanvas.addEventListener("pointermove", onImageMotion);
+  ui.imageCanvas.addEventListener("pointerup", onImageRelease);
+  ui.imageDialog.addEventListener("close", () => {
+    if (ui.imageDialog.returnValue === "use") applyImageResult();
+    imageRead = null;
+  });
 
   ui.canvas.addEventListener("pointerdown", e => (mode === "play" ? onPress : onEditPress)(e));
   ui.canvas.addEventListener("pointermove", e => (mode === "play" ? onMotion : onEditMotion)(e));
@@ -399,7 +421,7 @@ function onKey(e) {
     return;
   }
   const t = e.target;
-  if (t.matches?.("input[type=number], input[type=text], select, textarea") || ui.gameOver.open) return;
+  if (t.matches?.("input[type=number], input[type=text], select, textarea") || ui.gameOver.open || ui.imageDialog.open) return;
   const key = e.key.toLowerCase();
   if (mode === "analyze") {
     if (key === "f" && !(e.ctrlKey || e.metaKey || e.altKey)) {
@@ -1416,6 +1438,176 @@ function onEditContextMenu(e) {
     delete editPieces[square];
     positionEdited();
   }
+}
+
+// --------------------------------------------------- position from image
+
+let vision = null;      // vision.js, loaded on first use
+let imageRead = null;   // {image, source, box, result, drawing} while the image dialog is open
+
+function onPaste(e) {
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith("image/"));
+  if (!item) return;
+  e.preventDefault();
+  readFromImage(item.getAsFile());
+}
+
+function onDragOver(e) {
+  if (!e.dataTransfer?.types.includes("Files")) return;
+  e.preventDefault();
+  document.body.classList.add("dropping");
+}
+
+function onDrop(e) {
+  document.body.classList.remove("dropping");
+  const file = [...(e.dataTransfer?.files || [])].find(f => f.type.startsWith("image/"));
+  if (!file) return;
+  e.preventDefault();
+  readFromImage(file);
+}
+
+async function readFromImage(blob) {
+  if (!blob?.type?.startsWith("image/")) return;
+  setMode("analyze");
+  try {
+    vision ??= await import("./vision.js");
+    const image = await vision.loadImage(blob);
+    // Keep a canvas copy of the picture for drawing the preview.
+    const source = document.createElement("canvas");
+    source.width = image.width;
+    source.height = image.height;
+    source.getContext("2d").putImageData(image, 0, 0);
+    imageRead = { image, source, box: vision.detectBoard(image), result: null, drawing: null };
+  } catch (err) {
+    setEditStatus(`Couldn't read that image: ${err.message}`);
+    return;
+  }
+  const scale = Math.min(1, 1400 / Math.max(imageRead.image.width, imageRead.image.height));
+  ui.imageCanvas.width = Math.round(imageRead.image.width * scale);
+  ui.imageCanvas.height = Math.round(imageRead.image.height * scale);
+  ui.imageMsg.textContent = "Reading the board…";
+  ui.imageUse.disabled = true;
+  ui.imageDialog.returnValue = "";
+  if (!ui.imageDialog.open) ui.imageDialog.showModal();
+  drawImagePreview();
+  await recognise();
+}
+
+async function recognise() {
+  const read = imageRead;
+  const result = read.box ? await vision.readBoard(read.image, read.box) : null;
+  if (read !== imageRead) return;
+  read.result = result;
+  if (result) {
+    ui.imageFlipped.checked = result.flipped;
+    document.querySelector(`input[name=imageTurn][value="${result.turn}"]`).checked = true;
+  }
+  ui.imageUse.disabled = !result;
+  ui.imageMsg.textContent = result
+    ? "Check the letters against the picture. If the grid is off, drag a box around the board's 64 squares. " +
+      "Orange squares are uncertain; you can fix any mistake in the editor afterwards."
+    : "Couldn't find a board in this picture. Drag a box around the board's 64 squares.";
+  drawImagePreview();
+}
+
+function drawImagePreview() {
+  const read = imageRead;
+  if (!read) return;
+  const c = ui.imageCanvas, g = c.getContext("2d");
+  const k = c.width / read.image.width;
+  g.imageSmoothingQuality = "high";
+  g.drawImage(read.source, 0, 0, c.width, c.height);
+  const line = Math.max(1, c.width / 500);
+  if (read.drawing) {
+    const { x, y, w, h } = read.drawing;
+    g.setLineDash([6 * line, 4 * line]);
+    g.strokeStyle = "#e8493f";
+    g.lineWidth = 2 * line;
+    g.strokeRect(x * k, y * k, w * k, h * k);
+    g.setLineDash([]);
+    return;
+  }
+  if (!read.box) return;
+  const x0 = read.box.x * k, y0 = read.box.y * k, cw = read.box.w * k / 8, ch = read.box.h * k / 8;
+  g.strokeStyle = "rgba(21, 120, 27, 0.9)";
+  g.lineWidth = line;
+  for (let i = 0; i <= 8; i++) {
+    g.beginPath();
+    g.moveTo(x0 + i * cw, y0);
+    g.lineTo(x0 + i * cw, y0 + 8 * ch);
+    g.moveTo(x0, y0 + i * ch);
+    g.lineTo(x0 + 8 * cw, y0 + i * ch);
+    g.stroke();
+  }
+  if (!read.result) return;
+  const r = Math.min(cw, ch) * 0.2;
+  g.font = `bold ${r * 1.3}px system-ui, sans-serif`;
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  read.result.grid.forEach((cells, row) => cells.forEach((code, col) => {
+    const x = x0 + col * cw, y = y0 + row * ch;
+    if (read.result.confidence[row][col] < 0.15) {
+      g.strokeStyle = "#ff9800";
+      g.lineWidth = 3 * line;
+      g.strokeRect(x + 1.5 * line, y + 1.5 * line, cw - 3 * line, ch - 3 * line);
+    }
+    if (!code) return;
+    // A badge in the corner: white letter on black for Black's pieces, and vice versa.
+    const bx = x + r + 2 * line, by = y + r + 2 * line;
+    g.beginPath();
+    g.arc(bx, by, r, 0, 2 * Math.PI);
+    g.fillStyle = code[0] === "w" ? "#ffffff" : "#222222";
+    g.fill();
+    g.strokeStyle = code[0] === "w" ? "#222222" : "#ffffff";
+    g.lineWidth = line;
+    g.stroke();
+    g.fillStyle = code[0] === "w" ? "#222222" : "#ffffff";
+    g.fillText(code[1], bx, by + r * 0.05);
+  }));
+}
+
+function imagePoint(e) {
+  const rect = ui.imageCanvas.getBoundingClientRect();
+  const scale = imageRead.image.width / rect.width;
+  return { x: (e.clientX - rect.left) * scale, y: (e.clientY - rect.top) * scale };
+}
+
+function onImagePress(e) {
+  if (!imageRead || e.button !== 0) return;
+  ui.imageCanvas.setPointerCapture(e.pointerId);
+  const p = imagePoint(e);
+  imageRead.anchor = p;
+  imageRead.drawing = { x: p.x, y: p.y, w: 0, h: 0 };
+}
+
+function onImageMotion(e) {
+  if (!imageRead?.drawing) return;
+  const p = imagePoint(e), a = imageRead.anchor;
+  imageRead.drawing = { x: Math.min(a.x, p.x), y: Math.min(a.y, p.y), w: Math.abs(p.x - a.x), h: Math.abs(p.y - a.y) };
+  drawImagePreview();
+}
+
+function onImageRelease() {
+  const read = imageRead;
+  if (!read?.drawing) return;
+  const box = read.drawing;
+  read.drawing = null;
+  if (box.w < 16 || box.h < 16) {
+    drawImagePreview();
+    return;
+  }
+  read.box = box;
+  ui.imageMsg.textContent = "Reading the board…";
+  recognise();
+}
+
+function applyImageResult() {
+  const result = imageRead?.result;
+  if (!result) return;
+  const flippedBoard = ui.imageFlipped.checked;
+  const turn = document.querySelector("input[name=imageTurn]:checked").value;
+  editFlipped = flippedBoard;  // show the position the way the picture did
+  loadEditFen(`${vision.placementFen(result.grid, flippedBoard)} ${turn} KQkq - 0 1`);
 }
 
 function playFromHere() {
