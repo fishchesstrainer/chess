@@ -24,7 +24,11 @@ const SOLID = { p: "♟︎", n: "♞", b: "♝", r: "♜", q: "♛", k: "♚" };
 const OUTLINE = { p: "♙", n: "♘", b: "♗", r: "♖", q: "♕", k: "♔" };
 const PIECE_NAMES = { q: "Queen", r: "Rook", b: "Bishop", n: "Knight" };
 
-const ENGINE_URL = "vendor/stockfish/stockfish-19-lite-single.js";
+// Stockfish.js 19 builds (vendor/stockfish), with their .wasm sizes. Full is only fetched when chosen.
+const ENGINES = {
+  lite: { url: "vendor/stockfish/stockfish-19-lite-single.js", size: 1845971 },
+  full: { url: "vendor/stockfish/stockfish-19-single.js", size: 99169054 },
+};
 const FULL_STRENGTH = { UCI_LimitStrength: false, "Skill Level": 20 };
 const ELO_MIN = 1320, ELO_MAX = 3190;  // UCI_Elo range of Stockfish 19
 const SETTINGS_KEY = "chess-trainer:settings";
@@ -52,21 +56,39 @@ function whitePov(score, turn) {
 
 /** A Stockfish Web Worker speaking UCI. Jobs run one at a time, like the locks in the desktop app. */
 class Engine {
-  constructor(url, hash) {
+  /** url: the engine's .js file; wasm: promise of a URL for its .wasm (the worker starts once it resolves). */
+  constructor(url, hash, wasm) {
     this.name = "Stockfish";
     this.listeners = new Set();
-    this.worker = new Worker(url);
-    this.worker.onmessage = e => this.listeners.forEach(f => f(String(e.data)));
-    this.worker.onerror = e => {
-      e.preventDefault();
-      this.error = new Error(e.message || "could not load the engine");
-      this.listeners.forEach(f => f(null));
-    };
-    this.ready = this._init(hash);
+    this.ready = wasm.then(wasmUrl => this._start(url, wasmUrl, hash));
     this.chain = this.ready;
   }
 
-  send(cmd) { this.worker.postMessage(cmd); }
+  _start(url, wasmUrl, hash) {
+    if (this.error) throw this.error;
+    // Stockfish.js takes the location of its .wasm from the worker URL's hash.
+    this.worker = new Worker(`${url}#${encodeURIComponent(wasmUrl)}`);
+    this.worker.onmessage = e => {
+      if (typeof e.data === "string") this.listeners.forEach(f => f(e.data));
+    };
+    this.worker.onerror = e => {
+      e.preventDefault();
+      this._fail(new Error(e.message || "could not load the engine"));
+    };
+    return this._init(hash);
+  }
+
+  _fail(error) {
+    this.error ??= error;
+    this.listeners.forEach(f => f(null));
+  }
+
+  terminate() {
+    this.worker?.terminate();
+    this._fail(new Error("engine closed"));
+  }
+
+  send(cmd) { this.worker?.postMessage(cmd); }
 
   /** Resolve with the first line starting with prefix; onLine sees every line until then. */
   waitFor(prefix, onLine) {
@@ -153,9 +175,9 @@ let pieceImages = {};    // "wK" -> loaded HTMLImageElement
 let gen = 0;
 
 // Two engines: the opponent plays at the chosen strength; the coach runs the
-// eval bar at full strength and hints at the hint strength.
-const opponent = new Engine(ENGINE_URL, 32);
-const coach = new Engine(ENGINE_URL, 64);
+// eval bar at full strength and hints at the hint strength. See startEngines().
+let opponent = null;
+let coach = null;
 
 const ui = {
   canvas: $("board"),
@@ -169,6 +191,7 @@ const ui = {
   promoBox: $("promoBox"),
   gameOver: $("gameOver"),
   gameOverText: $("gameOverText"),
+  engine: $("engine"),
   thinkTime: $("thinkTime"),
   pieceSet: $("pieceSet"),
   theme: $("theme"),
@@ -240,14 +263,66 @@ function buildUi() {
   ui.canvas.addEventListener("pointermove", onMotion);
   ui.canvas.addEventListener("pointerup", onRelease);
   ui.canvas.addEventListener("pointercancel", () => { drag = null; redraw(); });
+  ui.engine.onchange = switchEngine;
   document.addEventListener("keydown", onKey);
   new ResizeObserver(resizeBoard).observe(ui.canvas);
+  startEngines();
+}
 
-  opponent.ready.then(() => { ui.engineName.textContent = opponent.name; },
-    err => {
-      ui.engineName.textContent = "Engine failed to load";
-      setStatus(`Could not start Stockfish: ${err.message}`);
-    });
+/** Fetch a .wasm into memory, reporting bytes loaded; resolves with a blob: URL. */
+async function downloadWasm(url, signal, onProgress) {
+  const response = await fetch(url, { signal });
+  if (!response.ok) throw new Error(`HTTP ${response.status} loading ${url}`);
+  const reader = response.body.getReader();
+  const chunks = [];
+  let loaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    onProgress(loaded);
+  }
+  return URL.createObjectURL(new Blob(chunks, { type: "application/wasm" }));
+}
+
+let wasmDownload = null;  // AbortController of the current engine download
+
+/** (Re)start both engines with the build chosen in the Engine list. */
+function startEngines() {
+  const { url, size } = ENGINES[ui.engine.value] || ENGINES.lite;
+  opponent?.terminate();
+  coach?.terminate();
+  wasmDownload?.abort();
+  wasmDownload = new AbortController();
+  ui.engineName.textContent = "Loading Stockfish…";
+  // Download the .wasm once and give both workers the same in-memory copy.
+  const mb = n => Math.round(n / 1e6);
+  let shownMb = -1;
+  const wasm = downloadWasm(url.replace(/\.js$/, ".wasm"), wasmDownload.signal, loaded => {
+    if (engine !== opponent || loaded >= size || mb(loaded) === shownMb) return;
+    shownMb = mb(loaded);
+    ui.engineName.textContent = `Downloading Stockfish… ${shownMb} / ${mb(size)} MB`;
+  });
+  const engine = opponent = new Engine(url, 32, wasm);
+  coach = new Engine(url, 64, wasm);
+  Promise.allSettled([opponent.ready, coach.ready]).then(() => wasm.then(URL.revokeObjectURL, () => {}));
+  engine.ready.then(() => {
+    if (engine === opponent) ui.engineName.textContent = engine.name;
+  }, err => {
+    if (engine !== opponent) return;
+    ui.engineName.textContent = "Engine failed to load";
+    setStatus(`Could not start Stockfish: ${err.message}`);
+  });
+}
+
+/** Swap engines mid-game: searches in flight are dropped and Stockfish moves again if it is its turn. */
+function switchEngine() {
+  gen++;
+  thinking = false;
+  startEngines();
+  if (outcome()) requestEval();
+  else afterPositionChange();
 }
 
 function onKey(e) {
@@ -309,7 +384,7 @@ function onShowEval() {
 
 // -------------------------------------------------------------- settings
 
-const SETTING_IDS = ["oppLevel", "oppLimit", "oppElo", "thinkTime", "hintLevel", "hintLimit", "hintElo",
+const SETTING_IDS = ["engine", "oppLevel", "oppLimit", "oppElo", "thinkTime", "hintLevel", "hintLimit", "hintElo",
   "showEval", "showMoves", "pieceSet", "theme"];
 
 function loadSettings() {

@@ -9,6 +9,7 @@ WebAssembly, so it works offline once loaded and nothing is sent anywhere.
 
 - Drag-and-drop or click-to-move, legal-move dots, last-move and check highlights
 - Play as White, Black or Random; flip board
+- Engine: Stockfish 19 **Lite** (1.8 MB, default) or **Full** (99 MB download, strongest; only fetched when chosen)
 - Stockfish strength: Skill Level 0–20 or an Elo limit (1320–3190), adjustable think time
 - Undo (takes back your move and Stockfish's reply)
 - Training aids: Hint arrow with its own adjustable strength (Skill Level 0–20 or Elo; 20 = best move),
@@ -34,13 +35,15 @@ python3 -m http.server 8000
 | Path | What |
 |---|---|
 | `index.html`, `style.css`, `app.js` | The app |
-| `vendor/stockfish/` | [Stockfish.js](https://github.com/nmrugg/stockfish.js) 19.0.1, lite single-threaded build |
+| `vendor/stockfish/` | [Stockfish.js](https://github.com/nmrugg/stockfish.js) 19.0.1, single-threaded builds: lite and full |
 | `vendor/chess.js/` | [chess.js](https://github.com/jhlywa/chess.js) 1.4.0 (move generation, PGN) |
 | `pieces/` | Piece images from [lichess](https://github.com/lichess-org/lila/tree/master/public/piece) |
 
-The lite single-threaded engine is used because it is small (≈1.8 MB) and needs no
-cross-origin-isolation headers, which GitHub Pages can't send. It is weaker than full
-Stockfish but still far stronger than any human.
+Only single-threaded builds are used: the multi-threaded ones need cross-origin-isolation
+headers, which GitHub Pages can't send. Lite (≈1.8 MB) is the default; it uses a smaller
+network than Full but is still far stronger than any human. Full (≈99 MB) is downloaded only
+when picked in the Engine list, once per page load for both engines, and then comes from the
+browser cache. The choice is remembered.
 
 ## Licences
 

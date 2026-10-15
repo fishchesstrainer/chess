@@ -51,6 +51,13 @@
 
       <fieldset class="card">
         <legend>Stockfish strength</legend>
+        <div class="row">
+          <label for="engine">Engine:</label>
+          <select id="engine">
+            <option value="lite" selected>Lite (1.8 MB)</option>
+            <option value="full">Full (99 MB download)</option>
+          </select>
+        </div>
         <label class="slider">
           <span>Skill level (0 = weakest, 20 = full): <output id="oppLevelOut">5</output></span>
           <input type="range" id="oppLevel" min="0" max="20" value="5">
