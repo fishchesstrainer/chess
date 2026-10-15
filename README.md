@@ -15,6 +15,10 @@ WebAssembly, so it works offline once loaded and nothing is sent anywhere.
 - Training aids: Hint arrow with its own adjustable strength (Skill Level 0–20 or Elo; 20 = best move),
   full-strength evaluation bar
 - Move list, save/copy PGN, copy FEN
+- **Analyze position** tab: set up any position (piece palette, drag pieces, right-click or drag
+  off the board to remove, load/paste a FEN, copy the game position), choose White or Black to
+  move, and Stockfish shows the best move (arrow) and its top 1–5 lines at full strength.
+  "Play this position against Stockfish" starts a game from there.
 - Appearance: 7 piece sets (default "maestro", see [pieces/README.md](pieces/README.md)) plus Unicode,
   and 4 board colours (default chess.com-style green)
 - Settings are remembered in the browser

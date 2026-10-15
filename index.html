@@ -31,81 +31,123 @@
         <span class="engine" id="engineName">Loading Stockfish…</span>
       </header>
 
-      <fieldset class="card">
-        <legend>Game</legend>
-        <div class="row">
-          <span>Play as:</span>
-          <label><input type="radio" name="playAs" value="white" checked> White</label>
-          <label><input type="radio" name="playAs" value="black"> Black</label>
-          <label><input type="radio" name="playAs" value="random"> Random</label>
-        </div>
-        <div class="buttons">
-          <button id="newGame" title="New game (N)">New game</button>
-          <button id="undo" title="Undo move (Z)">Undo move</button>
-          <button id="flip" title="Flip board (F)">Flip board</button>
-          <button id="savePgn">Save PGN…</button>
-          <button id="copyFen">Copy FEN</button>
-          <button id="copyPgn">Copy PGN</button>
-        </div>
-      </fieldset>
+      <nav class="tabs" role="tablist">
+        <button role="tab" id="tabPlay" aria-selected="true" aria-controls="playPanel">Play</button>
+        <button role="tab" id="tabAnalyze" aria-selected="false" aria-controls="analyzePanel">Analyze position</button>
+      </nav>
+
+      <div class="mode-panel" id="playPanel" role="tabpanel">
+        <fieldset class="card">
+          <legend>Game</legend>
+          <div class="row">
+            <span>Play as:</span>
+            <label><input type="radio" name="playAs" value="white" checked> White</label>
+            <label><input type="radio" name="playAs" value="black"> Black</label>
+            <label><input type="radio" name="playAs" value="random"> Random</label>
+          </div>
+          <div class="buttons">
+            <button id="newGame" title="New game (N)">New game</button>
+            <button id="undo" title="Undo move (Z)">Undo move</button>
+            <button id="flip" title="Flip board (F)">Flip board</button>
+            <button id="savePgn">Save PGN…</button>
+            <button id="copyFen">Copy FEN</button>
+            <button id="copyPgn">Copy PGN</button>
+          </div>
+        </fieldset>
+
+        <fieldset class="card">
+          <legend>Stockfish strength</legend>
+          <label class="slider">
+            <span>Skill level (0 = weakest, 20 = full): <output id="oppLevelOut">5</output></span>
+            <input type="range" id="oppLevel" min="0" max="20" value="5">
+          </label>
+          <div class="row">
+            <label><input type="checkbox" id="oppLimit"> Limit to Elo</label>
+            <input type="number" id="oppElo" min="1320" max="3190" step="50" value="1500" disabled>
+          </div>
+          <div class="row">
+            <label for="thinkTime">Think time (s):</label>
+            <select id="thinkTime">
+              <option>0.1</option><option>0.3</option><option selected>0.5</option>
+              <option>1</option><option>2</option><option>5</option>
+            </select>
+          </div>
+        </fieldset>
+
+        <fieldset class="card">
+          <legend>Training</legend>
+          <button id="hint" class="primary" title="Hint (H)">Hint</button>
+          <label class="slider">
+            <span>Hint strength (20 = best move): <output id="hintLevelOut">20</output></span>
+            <input type="range" id="hintLevel" min="0" max="20" value="20">
+          </label>
+          <div class="row">
+            <label><input type="checkbox" id="hintLimit"> Limit to Elo</label>
+            <input type="number" id="hintElo" min="1320" max="3190" step="50" value="2000" disabled>
+          </div>
+          <label class="check"><input type="checkbox" id="showEval" checked> Show evaluation bar</label>
+          <label class="check"><input type="checkbox" id="showMoves" checked> Show legal moves</label>
+        </fieldset>
+
+        <fieldset class="card moves-card">
+          <legend>Moves</legend>
+          <ol class="moves" id="moves"></ol>
+        </fieldset>
+
+        <p class="keys">Shortcuts: <kbd>N</kbd> new game · <kbd>Z</kbd> undo · <kbd>H</kbd> hint · <kbd>F</kbd> flip</p>
+      </div>
+
+      <div class="mode-panel" id="analyzePanel" role="tabpanel" hidden>
+        <fieldset class="card">
+          <legend>Set up position</legend>
+          <div class="palette" id="palette"></div>
+          <p class="muted">Pick a piece and click squares to place it (click again to remove).
+            With <b>Move</b>, drag pieces around; drag one off the board or right-click it to remove it.</p>
+          <div class="row">
+            <span>To move:</span>
+            <label><input type="radio" name="editTurn" value="w" checked> White</label>
+            <label><input type="radio" name="editTurn" value="b"> Black</label>
+          </div>
+          <div class="buttons">
+            <button id="editStart">Start position</button>
+            <button id="editClear">Clear board</button>
+            <button id="editFlip" title="Flip board (F)">Flip board</button>
+            <button id="editFromGame">Copy from game</button>
+          </div>
+          <div class="fen-row">
+            <input type="text" id="editFen" aria-label="FEN" spellcheck="false" autocomplete="off">
+            <button id="editLoadFen">Load FEN</button>
+          </div>
+        </fieldset>
+
+        <fieldset class="card">
+          <legend>Best moves</legend>
+          <div class="row">
+            <label for="anaLines">Lines:</label>
+            <select id="anaLines"><option>1</option><option>2</option><option selected>3</option><option>5</option></select>
+            <label for="anaTime">Think time (s):</label>
+            <select id="anaTime"><option>1</option><option selected>3</option><option>5</option><option>10</option><option>30</option></select>
+          </div>
+          <ol class="lines" id="anaList"></ol>
+          <p class="muted" id="anaInfo"></p>
+          <button id="playFromHere" class="primary">Play this position against Stockfish</button>
+        </fieldset>
+      </div>
 
       <fieldset class="card">
-        <legend>Stockfish strength</legend>
-        <div class="row">
+        <legend>Engine &amp; appearance</legend>
+        <div class="grid2">
           <label for="engine">Engine:</label>
           <select id="engine">
             <option value="lite" selected>Lite (1.8 MB)</option>
             <option value="full">Full (99 MB download)</option>
           </select>
-        </div>
-        <label class="slider">
-          <span>Skill level (0 = weakest, 20 = full): <output id="oppLevelOut">5</output></span>
-          <input type="range" id="oppLevel" min="0" max="20" value="5">
-        </label>
-        <div class="row">
-          <label><input type="checkbox" id="oppLimit"> Limit to Elo</label>
-          <input type="number" id="oppElo" min="1320" max="3190" step="50" value="1500" disabled>
-        </div>
-        <div class="row">
-          <label for="thinkTime">Think time (s):</label>
-          <select id="thinkTime">
-            <option>0.1</option><option>0.3</option><option selected>0.5</option>
-            <option>1</option><option>2</option><option>5</option>
-          </select>
-        </div>
-      </fieldset>
-
-      <fieldset class="card">
-        <legend>Appearance</legend>
-        <div class="grid2">
           <label for="pieceSet">Pieces:</label>
           <select id="pieceSet"></select>
           <label for="theme">Board:</label>
           <select id="theme"></select>
         </div>
       </fieldset>
-
-      <fieldset class="card">
-        <legend>Training</legend>
-        <button id="hint" class="primary" title="Hint (H)">Hint</button>
-        <label class="slider">
-          <span>Hint strength (20 = best move): <output id="hintLevelOut">20</output></span>
-          <input type="range" id="hintLevel" min="0" max="20" value="20">
-        </label>
-        <div class="row">
-          <label><input type="checkbox" id="hintLimit"> Limit to Elo</label>
-          <input type="number" id="hintElo" min="1320" max="3190" step="50" value="2000" disabled>
-        </div>
-        <label class="check"><input type="checkbox" id="showEval" checked> Show evaluation bar</label>
-        <label class="check"><input type="checkbox" id="showMoves" checked> Show legal moves</label>
-      </fieldset>
-
-      <fieldset class="card moves-card">
-        <legend>Moves</legend>
-        <ol class="moves" id="moves"></ol>
-      </fieldset>
-
-      <p class="keys">Shortcuts: <kbd>N</kbd> new game · <kbd>Z</kbd> undo · <kbd>H</kbd> hint · <kbd>F</kbd> flip</p>
     </aside>
   </main>
 

@@ -22,7 +22,8 @@ const DEFAULT_PIECE_SET = "maestro";
 // U+FE0E asks for the text (not emoji) presentation of the pawn.
 const SOLID = { p: "♟︎", n: "♞", b: "♝", r: "♜", q: "♛", k: "♚" };
 const OUTLINE = { p: "♙", n: "♘", b: "♗", r: "♖", q: "♕", k: "♔" };
-const PIECE_NAMES = { q: "Queen", r: "Rook", b: "Bishop", n: "Knight" };
+const PIECE_NAMES = { k: "King", q: "Queen", r: "Rook", b: "Bishop", n: "Knight", p: "Pawn" };
+const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 // Stockfish.js 19 builds (vendor/stockfish), with their .wasm sizes. Full is only fetched when chosen.
 const ENGINES = {
@@ -150,6 +151,26 @@ class Engine {
     return { move: best && best !== "(none)" ? best : null, score };
   }
 
+  /** Search a FEN for movetime ms, calling onInfo({multipv, depth, score, pv}) as lines come in; returns the best move. */
+  async analyse(fen, movetime, onInfo) {
+    const done = this.waitFor("bestmove", line => {
+      if (!line.startsWith("info ") || !line.includes(" pv ") || /\b(lower|upper)bound\b/.test(line)) return;
+      const score = line.match(/\bscore (cp|mate) (-?\d+)/);
+      if (!score) return;
+      const field = name => Number((line.match(new RegExp(`\\b${name} (\\d+)`)) || [])[1] || 0);
+      onInfo({
+        multipv: field("multipv") || 1,
+        depth: field("depth"),
+        score: { type: score[1], value: Number(score[2]) },
+        pv: line.split(" pv ")[1].trim().split(/\s+/),
+      });
+    });
+    this.send(`position fen ${fen}`);
+    this.send(`go movetime ${Math.round(movetime)}`);
+    const best = (await done).split(" ")[1];
+    return best && best !== "(none)" ? best : null;
+  }
+
   stop() { this.send("stop"); }
 
   newGame() {
@@ -173,6 +194,23 @@ let promoCancel = null;  // set while the promotion picker is open
 let pieceImages = {};    // "wK" -> loaded HTMLImageElement
 // Bumped on new game / undo so results of searches already in flight are dropped.
 let gen = 0;
+let mode = "play";       // "play" or "analyze" (the position editor tab)
+
+// Position editor ("Analyze position" tab)
+let editPieces = {};     // square -> {color, type}
+let editTurn = "w";
+let editCastling = "KQkq"; // castling rights of the loaded FEN; editFenString() drops any that no longer fit
+let editFlipped = false;
+let editTool = "move";   // "move", "erase" or a piece code such as "wq"
+let editDrag = null;     // {from, piece, x, y} while dragging a piece with the Move tool
+let paintTool = null;    // tool being painted with while the pointer is held down
+let editCheck = null;    // king square to highlight when the side to move is in check
+let editStatus = "";
+let analysis = null;     // {fen, turn, lines: [{multipv, depth, score, pv}], done}
+let editEval = [0.5, ""];
+let hoverLine = null;    // index of the analysis line under the mouse
+let anaGen = 0;          // bumped whenever the edited position changes
+let anaTimer = null;
 
 // Two engines: the opponent plays at the chosen strength; the coach runs the
 // eval bar at full strength and hints at the hint strength. See startEngines().
@@ -197,6 +235,16 @@ const ui = {
   theme: $("theme"),
   showEval: $("showEval"),
   showMoves: $("showMoves"),
+  tabPlay: $("tabPlay"),
+  tabAnalyze: $("tabAnalyze"),
+  playPanel: $("playPanel"),
+  analyzePanel: $("analyzePanel"),
+  palette: $("palette"),
+  editFen: $("editFen"),
+  anaLines: $("anaLines"),
+  anaTime: $("anaTime"),
+  anaList: $("anaList"),
+  anaInfo: $("anaInfo"),
 };
 const ctx = ui.canvas.getContext("2d");
 let sq = 0;  // square size in canvas pixels
@@ -239,7 +287,9 @@ function buildUi() {
   for (const name of Object.keys(THEMES)) ui.theme.add(new Option(name, name));
   ui.pieceSet.value = DEFAULT_PIECE_SET;
   ui.theme.value = "Green";
+  loadEditFen(START_FEN, false);
   loadSettings();
+  updateEvalVisibility();
   oppStrength.sync();
   hintStrength.sync();
 
@@ -259,10 +309,27 @@ function buildUi() {
   });
   document.querySelector(".panel").addEventListener("change", saveSettings);
 
-  ui.canvas.addEventListener("pointerdown", onPress);
-  ui.canvas.addEventListener("pointermove", onMotion);
-  ui.canvas.addEventListener("pointerup", onRelease);
-  ui.canvas.addEventListener("pointercancel", () => { drag = null; redraw(); });
+  ui.tabPlay.onclick = () => setMode("play");
+  ui.tabAnalyze.onclick = () => setMode("analyze");
+  $("editStart").onclick = () => loadEditFen(START_FEN);
+  $("editClear").onclick = () => { editPieces = {}; positionEdited(); };
+  $("editFlip").onclick = flip;
+  $("editFromGame").onclick = () => loadEditFen(game.fen());
+  $("editLoadFen").onclick = () => loadEditFen(ui.editFen.value);
+  ui.editFen.addEventListener("keydown", e => { if (e.key === "Enter") loadEditFen(ui.editFen.value); });
+  $("playFromHere").onclick = playFromHere;
+  for (const radio of document.querySelectorAll("input[name=editTurn]")) {
+    radio.onchange = () => { editTurn = radio.value; positionEdited(); };
+  }
+  ui.anaLines.onchange = positionEdited;
+  ui.anaTime.onchange = positionEdited;
+  ui.anaList.addEventListener("mouseleave", () => { hoverLine = null; redraw(); });
+
+  ui.canvas.addEventListener("pointerdown", e => (mode === "play" ? onPress : onEditPress)(e));
+  ui.canvas.addEventListener("pointermove", e => (mode === "play" ? onMotion : onEditMotion)(e));
+  ui.canvas.addEventListener("pointerup", e => (mode === "play" ? onRelease : onEditRelease)(e));
+  ui.canvas.addEventListener("pointercancel", () => { drag = editDrag = paintTool = null; redraw(); });
+  ui.canvas.addEventListener("contextmenu", onEditContextMenu);
   ui.engine.onchange = switchEngine;
   document.addEventListener("keydown", onKey);
   new ResizeObserver(resizeBoard).observe(ui.canvas);
@@ -323,6 +390,7 @@ function switchEngine() {
   startEngines();
   if (outcome()) requestEval();
   else afterPositionChange();
+  if (mode === "analyze") positionEdited();
 }
 
 function onKey(e) {
@@ -331,8 +399,15 @@ function onKey(e) {
     return;
   }
   const t = e.target;
-  if (t.matches?.("input[type=number], select, textarea") || ui.gameOver.open) return;
+  if (t.matches?.("input[type=number], input[type=text], select, textarea") || ui.gameOver.open) return;
   const key = e.key.toLowerCase();
+  if (mode === "analyze") {
+    if (key === "f" && !(e.ctrlKey || e.metaKey || e.altKey)) {
+      e.preventDefault();
+      flip();
+    }
+    return;
+  }
   if ((e.ctrlKey || e.metaKey) && key === "z") {
     e.preventDefault();
     undo();
@@ -348,7 +423,12 @@ function onKey(e) {
 
 function setStatus(text) {
   status = text;
-  ui.status.textContent = text;
+  if (mode === "play") ui.status.textContent = text;
+}
+
+function setEditStatus(text) {
+  editStatus = text;
+  if (mode === "analyze") ui.status.textContent = text;
 }
 
 function colors() {
@@ -370,6 +450,7 @@ function loadPieceImages() {
     }
     pieceImages = images;
   }
+  buildPalette();
   redraw();
 }
 
@@ -377,15 +458,19 @@ function pieceSrc(set, color, type) {
   return `pieces/${set}/${color}${type.toUpperCase()}.png`;
 }
 
+function updateEvalVisibility() {
+  ui.eval.hidden = mode === "play" && !ui.showEval.checked;
+}
+
 function onShowEval() {
-  ui.eval.hidden = !ui.showEval.checked;
+  updateEvalVisibility();
   if (ui.showEval.checked) requestEval();
 }
 
 // -------------------------------------------------------------- settings
 
 const SETTING_IDS = ["engine", "oppLevel", "oppLimit", "oppElo", "thinkTime", "hintLevel", "hintLimit", "hintElo",
-  "showEval", "showMoves", "pieceSet", "theme"];
+  "showEval", "showMoves", "pieceSet", "theme", "anaLines", "anaTime"];
 
 function loadSettings() {
   let saved;
@@ -402,11 +487,16 @@ function loadSettings() {
   }
   const radio = document.querySelector(`input[name=playAs][value="${saved.playAs}"]`);
   if (radio) radio.checked = true;
-  ui.eval.hidden = !ui.showEval.checked;
+  if (saved.editFen) loadEditFen(saved.editFen, false);
+  if (saved.tab === "analyze") mode = "analyze";
 }
 
 function saveSettings() {
-  const saved = { playAs: document.querySelector("input[name=playAs]:checked").value };
+  const saved = {
+    playAs: document.querySelector("input[name=playAs]:checked").value,
+    tab: mode,
+    editFen: editFenString(),
+  };
   for (const id of SETTING_IDS) {
     const el = $(id);
     saved[id] = el.type === "checkbox" ? el.checked : el.value;
@@ -432,9 +522,13 @@ const fileOf = square => square.charCodeAt(0) - 97;
 const rankOf = square => Number(square[1]) - 1;
 const squareName = (file, rank) => String.fromCharCode(97 + file) + (rank + 1);
 
+function boardFlipped() {
+  return mode === "play" ? flipped : editFlipped;
+}
+
 function squareCell(square) {
   const file = fileOf(square), rank = rankOf(square);
-  return flipped ? [7 - file, rank] : [file, 7 - rank];
+  return boardFlipped() ? [7 - file, rank] : [file, 7 - rank];
 }
 
 /** Pixel rectangle [x, y, w, h] of a board cell; rounded so neighbouring squares meet exactly. */
@@ -451,7 +545,7 @@ function squareCenter(square) {
 function squareAt(x, y) {
   const col = Math.floor(x / sq), row = Math.floor(y / sq);
   if (col < 0 || col > 7 || row < 0 || row > 7) return null;
-  return flipped ? squareName(7 - col, row) : squareName(col, 7 - row);
+  return boardFlipped() ? squareName(7 - col, row) : squareName(col, 7 - row);
 }
 
 function isLightSquare(square) {
@@ -463,10 +557,10 @@ function lastMove() {
   return history[history.length - 1] || null;
 }
 
-function squareColor(square, last) {
+function squareColor(square, highlights) {
   const [light, dark, lightHl, darkHl] = colors();
   const light_ = isLightSquare(square);
-  if (square === selected || (last && (square === last.from || square === last.to))) return light_ ? lightHl : darkHl;
+  if (highlights.has(square)) return light_ ? lightHl : darkHl;
   return light_ ? light : dark;
 }
 
@@ -512,19 +606,45 @@ function drawArrow(from, to) {
   ctx.restore();
 }
 
+/** What the board shows in play mode. */
+function playView() {
+  const last = lastMove();
+  return {
+    pieces: game.board().flat().filter(Boolean),
+    highlights: new Set([selected, last?.from, last?.to].filter(Boolean)),
+    check: game.inCheck() ? game.findPiece({ type: "k", color: game.turn() })[0] : null,
+    targets: selected && ui.showMoves.checked ? game.moves({ square: selected, verbose: true }) : [],
+    arrow: hintMove,
+    drag: drag && selected ? { from: selected, piece: game.get(selected), x: drag.x, y: drag.y } : null,
+  };
+}
+
+/** What the board shows in the position editor. */
+function editView() {
+  const line = analysis?.lines[hoverLine ?? 0];
+  const move = line?.pv[0];
+  return {
+    pieces: Object.entries(editPieces).map(([square, piece]) => ({ square, ...piece })),
+    highlights: new Set(editDrag ? [editDrag.from] : []),
+    check: editCheck,
+    targets: [],
+    arrow: move ? { from: move.slice(0, 2), to: move.slice(2, 4) } : null,
+    drag: editDrag,
+  };
+}
+
 function redraw() {
   if (!sq) return;
   ctx.imageSmoothingQuality = "high";
-  const last = lastMove();
-  const checkSquare = game.inCheck() ? game.findPiece({ type: "k", color: game.turn() })[0] : null;
+  const view = mode === "play" ? playView() : editView();
 
   for (let file = 0; file < 8; file++) {
     for (let rank = 0; rank < 8; rank++) {
       const square = squareName(file, rank);
       const [x, y, w, h] = cellRect(...squareCell(square));
-      ctx.fillStyle = squareColor(square, last);
+      ctx.fillStyle = squareColor(square, view.highlights);
       ctx.fillRect(x, y, w, h);
-      if (square === checkSquare) {
+      if (square === view.check) {
         const g = ctx.createRadialGradient(x + w / 2, y + h / 2, 0, x + w / 2, y + h / 2, w * 0.6);
         g.addColorStop(0, CHECK);
         g.addColorStop(0.55, CHECK);
@@ -536,10 +656,11 @@ function redraw() {
   }
 
   const [light, dark] = colors();
+  const flip_ = boardFlipped();
   ctx.font = `bold ${Math.max(9, sq / 6.5)}px system-ui, "DejaVu Sans", sans-serif`;
   for (let i = 0; i < 8; i++) {
-    const fileChar = "abcdefgh"[flipped ? 7 - i : i];
-    const rankChar = String(flipped ? i + 1 : 8 - i);
+    const fileChar = "abcdefgh"[flip_ ? 7 - i : i];
+    const rankChar = String(flip_ ? i + 1 : 8 - i);
     // Top-left square is always light, so bottom-row cell i is light when i is odd.
     ctx.fillStyle = i % 2 ? dark : light;
     ctx.textAlign = "right";
@@ -551,36 +672,34 @@ function redraw() {
     ctx.fillText(rankChar, sq * 0.05, i * sq + sq * 0.04);
   }
 
-  if (selected && ui.showMoves.checked) {
-    for (const move of game.moves({ square: selected, verbose: true })) {
-      const [cx, cy] = squareCenter(move.to);
-      ctx.beginPath();
-      if (move.captured) {
-        ctx.strokeStyle = shade(squareColor(move.to, last), 0.8);
-        ctx.lineWidth = Math.max(3, sq / 12);
-        ctx.arc(cx, cy, sq * 0.46 - ctx.lineWidth / 2, 0, 2 * Math.PI);
-        ctx.stroke();
-      } else {
-        ctx.fillStyle = shade(squareColor(move.to, last), 0.8);
-        ctx.arc(cx, cy, sq * 0.15, 0, 2 * Math.PI);
-        ctx.fill();
-      }
+  for (const move of view.targets) {
+    const [cx, cy] = squareCenter(move.to);
+    const color = shade(squareColor(move.to, view.highlights), 0.8);
+    ctx.beginPath();
+    if (move.captured) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(3, sq / 12);
+      ctx.arc(cx, cy, sq * 0.46 - ctx.lineWidth / 2, 0, 2 * Math.PI);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = color;
+      ctx.arc(cx, cy, sq * 0.15, 0, 2 * Math.PI);
+      ctx.fill();
     }
   }
 
-  for (const row of game.board()) {
-    for (const piece of row) {
-      if (!piece || (drag && piece.square === selected)) continue;
-      drawPiece(piece, ...squareCenter(piece.square));
-    }
+  for (const piece of view.pieces) {
+    if (view.drag && piece.square === view.drag.from) continue;
+    drawPiece(piece, ...squareCenter(piece.square));
   }
 
-  if (hintMove) drawArrow(hintMove.from, hintMove.to);
-  if (drag && selected) drawPiece(game.get(selected), drag.x, drag.y);
+  if (view.arrow) drawArrow(view.arrow.from, view.arrow.to);
+  if (view.drag) drawPiece(view.drag.piece, view.drag.x, view.drag.y);
 }
 
 function drawEvalBar() {
-  const [frac, label] = evalInfo;
+  const [frac, label] = mode === "play" ? evalInfo : editEval;
+  const flipped = boardFlipped();
   ui.eval.classList.toggle("flipped", flipped);
   ui.evalWhite.style.height = `${frac * 100}%`;
   // The label sits at the end of the side that is ahead.
@@ -594,17 +713,21 @@ function drawEvalBar() {
 
 function updateMoveList() {
   const sans = game.history();
+  const start = enginePosition().fen.split(" ");
+  // A game set up with Black to move starts with an empty White slot ("1. … Nf6").
+  const slots = start[1] === "b" ? ["…", ...sans] : sans;
+  const firstNumber = Number(start[5]) || 1;
   const items = [];
-  for (let i = 0; i < sans.length; i += 2) {
+  for (let i = 0; i < slots.length; i += 2) {
     const li = document.createElement("li");
     const num = document.createElement("span");
     num.className = "num";
-    num.textContent = `${i / 2 + 1}.`;
+    num.textContent = `${firstNumber + i / 2}.`;
     li.append(num);
     for (const j of [i, i + 1]) {
       const span = document.createElement("span");
-      span.textContent = sans[j] || "";
-      if (j === sans.length - 1) span.className = "last";
+      span.textContent = slots[j] || "";
+      if (j === slots.length - 1) span.className = "last";
       li.append(span);
     }
     items.push(li);
@@ -732,13 +855,18 @@ function askPromotion(color) {
 // ------------------------------------------------------------- game flow
 
 function newGame() {
+  const choice = document.querySelector("input[name=playAs]:checked").value;
+  userColor = choice === "random" ? (Math.random() < 0.5 ? "w" : "b") : (choice === "white" ? "w" : "b");
+  startGame(START_FEN);
+}
+
+/** Start a game from fen with the user playing userColor. */
+function startGame(fen) {
   gen++;
   promoCancel?.();
   if (ui.gameOver.open) ui.gameOver.close();
-  const choice = document.querySelector("input[name=playAs]:checked").value;
-  userColor = choice === "random" ? (Math.random() < 0.5 ? "w" : "b") : (choice === "white" ? "w" : "b");
   flipped = userColor === "b";
-  game.reset();
+  game.load(fen);
   selected = null;
   drag = null;
   hintMove = null;
@@ -782,7 +910,8 @@ function undo() {
 }
 
 function flip() {
-  flipped = !flipped;
+  if (mode === "play") flipped = !flipped;
+  else editFlipped = !editFlipped;
   redraw();
   drawEvalBar();
 }
@@ -811,7 +940,7 @@ function showGameOver({ winner, reason }) {
   setStatus(`Game over — ${text}  (${resultString()})`);
   const token = gen;
   setTimeout(() => {
-    if (token !== gen || ui.gameOver.open) return;
+    if (token !== gen || ui.gameOver.open || mode !== "play") return;
     ui.gameOverText.textContent = text;
     ui.gameOver.returnValue = "";
     ui.gameOver.showModal();
@@ -916,10 +1045,398 @@ function onHint({ move, score, label }) {
   setStatus(text);
 }
 
+// ------------------------------------------------------------- tabs
+
+function setMode(next) {
+  if (mode === next) return;
+  promoCancel?.();
+  mode = next;
+  const analyze = mode === "analyze";
+  ui.tabPlay.setAttribute("aria-selected", String(!analyze));
+  ui.tabAnalyze.setAttribute("aria-selected", String(analyze));
+  ui.playPanel.hidden = analyze;
+  ui.analyzePanel.hidden = !analyze;
+  drag = editDrag = paintTool = null;
+  ui.canvas.style.cursor = "default";
+  updateEvalVisibility();
+  if (analyze) {
+    positionEdited();
+  } else {
+    stopAnalysis();
+    ui.status.textContent = status;
+    drawEvalBar();
+    redraw();
+    requestEval();
+  }
+  saveSettings();
+}
+
+// ------------------------------------------------------- position editor
+
+function buildPalette() {
+  const tools = [["move", "Move"], ..."kqrbnp".split("").map(t => ["w" + t]),
+    ["erase", "Erase"], ..."kqrbnp".split("").map(t => ["b" + t])];
+  const buttons = tools.map(([tool, label]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.tool = tool;
+    if (label) {
+      button.className = "tool";
+      button.textContent = label;
+      button.title = tool === "move" ? "Drag pieces to move them" : "Click pieces to remove them";
+    } else {
+      const [color, type] = tool;
+      button.title = `${color === "w" ? "White" : "Black"} ${PIECE_NAMES[type].toLowerCase()}`;
+      button.style.background = colors()[0];
+      if (ui.pieceSet.value === UNICODE_SET) {
+        button.textContent = color === "w" ? OUTLINE[type] : SOLID[type];
+      } else {
+        const img = document.createElement("img");
+        img.src = pieceSrc(ui.pieceSet.value, color, type);
+        img.alt = button.title;
+        button.append(img);
+      }
+    }
+    button.onclick = () => selectTool(tool);
+    return button;
+  });
+  ui.palette.replaceChildren(...buttons);
+  selectTool(editTool);
+}
+
+function selectTool(tool) {
+  editTool = tool;
+  for (const button of ui.palette.children) button.classList.toggle("active", button.dataset.tool === tool);
+}
+
+function editFenString() {
+  const rows = [];
+  for (let rank = 7; rank >= 0; rank--) {
+    let row = "", empty = 0;
+    for (let file = 0; file < 8; file++) {
+      const piece = editPieces[squareName(file, rank)];
+      if (!piece) {
+        empty++;
+        continue;
+      }
+      if (empty) row += empty;
+      empty = 0;
+      row += piece.color === "w" ? piece.type.toUpperCase() : piece.type;
+    }
+    rows.push(row + (empty || ""));
+  }
+  // Keep the loaded castling rights whose king and rook still stand on their original squares.
+  const at = (square, code) => {
+    const piece = editPieces[square];
+    return piece && piece.color + piece.type === code;
+  };
+  const home = { K: ["e1", "h1", "w"], Q: ["e1", "a1", "w"], k: ["e8", "h8", "b"], q: ["e8", "a8", "b"] };
+  let castling = "";
+  for (const [right, [king, rook, color]] of Object.entries(home)) {
+    if (editCastling.includes(right) && at(king, color + "k") && at(rook, color + "r")) castling += right;
+  }
+  return `${rows.join("/")} ${editTurn} ${castling || "-"} - 0 1`;
+}
+
+/** Parse the board and side to move of a FEN; throws with a readable message. */
+function parseFen(text) {
+  const [placement, turn = "w", castling = "KQkq"] = text.trim().split(/\s+/);
+  const rows = (placement || "").split("/");
+  if (rows.length !== 8) throw new Error("A FEN needs 8 ranks separated by \"/\".");
+  const pieces = {};
+  rows.forEach((row, i) => {
+    let file = 0;
+    for (const ch of row) {
+      if (/[1-8]/.test(ch)) {
+        file += Number(ch);
+      } else if (/[pnbrqk]/i.test(ch)) {
+        if (file > 7) break;
+        pieces[squareName(file, 7 - i)] = { color: ch === ch.toUpperCase() ? "w" : "b", type: ch.toLowerCase() };
+        file++;
+      } else {
+        throw new Error(`Unexpected "${ch}" in the FEN.`);
+      }
+    }
+    if (file !== 8) throw new Error(`Rank ${8 - i} of the FEN doesn't add up to 8 squares.`);
+  });
+  if (!/^[wb]$/.test(turn)) throw new Error("The side to move must be \"w\" or \"b\".");
+  return { pieces, turn, castling: castling === "-" ? "" : castling };
+}
+
+function loadEditFen(text, edited = true) {
+  try {
+    const { pieces, turn, castling } = parseFen(text);
+    editPieces = pieces;
+    editTurn = turn;
+    editCastling = castling;
+    document.querySelector(`input[name=editTurn][value="${turn}"]`).checked = true;
+  } catch (err) {
+    if (edited) setEditStatus(err.message);
+    return;
+  }
+  if (edited) positionEdited();
+}
+
+/** Check the edited position; returns {fen, chess} or {fen, error}. */
+function validateEdit() {
+  const fen = editFenString();
+  const pieces = Object.entries(editPieces);
+  const count = (color, type) => pieces.filter(([, p]) => p.color === color && (!type || p.type === type)).length;
+  for (const [color, name] of [["w", "White"], ["b", "Black"]]) {
+    if (count(color, "k") !== 1) return { fen, error: `${name} needs exactly one king.` };
+    if (count(color, "p") > 8) return { fen, error: `${name} has more than 8 pawns.` };
+    if (count(color) > 16) return { fen, error: `${name} has more than 16 pieces.` };
+  }
+  if (pieces.some(([square, p]) => p.type === "p" && (square[1] === "1" || square[1] === "8"))) {
+    return { fen, error: "Pawns can't stand on the first or last rank." };
+  }
+  let chess;
+  try {
+    chess = new Chess(fen);
+  } catch (err) {
+    return { fen, error: err.message };
+  }
+  const waiting = editTurn === "w" ? "b" : "w";
+  const waitingKing = chess.findPiece({ type: "k", color: waiting })[0];
+  if (chess.isAttacked(waitingKing, editTurn)) {
+    const [mover, other] = editTurn === "w" ? ["White", "Black"] : ["Black", "White"];
+    return { fen, error: `${other} is in check while it's ${mover}'s move — that can't happen in a real game.` };
+  }
+  return { fen, chess };
+}
+
+/** Called after every change to the edited position: redraw and re-analyse. */
+function positionEdited() {
+  if (mode !== "analyze") return;
+  const { fen, chess, error } = validateEdit();
+  if (document.activeElement !== ui.editFen) ui.editFen.value = fen;
+  editCheck = chess?.inCheck() ? chess.findPiece({ type: "k", color: editTurn })[0] : null;
+  stopAnalysis();
+  analysis = null;
+  hoverLine = null;
+  renderAnalysis();
+  saveSettings();
+  if (error) {
+    editEval = [0.5, ""];
+    drawEvalBar();
+    redraw();
+    setEditStatus(error);
+    return;
+  }
+  const side = editTurn === "w" ? "White" : "Black";
+  if (chess.isCheckmate()) {
+    editEval = editTurn === "w" ? [0, "0-1"] : [1, "1-0"];
+    setEditStatus(`${side} is checkmated.`);
+  } else if (chess.isStalemate()) {
+    editEval = [0.5, "½"];
+    setEditStatus(`${side} has no legal moves — stalemate.`);
+  } else {
+    setEditStatus(`${side} to move — analysing…`);
+    anaTimer = setTimeout(() => runAnalysis(fen), 250);
+  }
+  drawEvalBar();
+  redraw();
+}
+
+function stopAnalysis() {
+  anaGen++;
+  clearTimeout(anaTimer);
+  if (analysis && !analysis.done) coach?.stop();
+}
+
+function runAnalysis(fen) {
+  const myGen = anaGen;
+  const stale = () => myGen !== anaGen || mode !== "analyze";
+  const turn = fen.split(" ")[1];
+  const multipv = Number(ui.anaLines.value);
+  analysis = { fen, turn, lines: [], done: false };
+  let pending = false;
+  const scheduleRender = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; if (!stale()) renderAnalysis(); });
+  };
+  coach.run(async e => {
+    if (stale()) return;
+    e.configure({ ...FULL_STRENGTH, MultiPV: multipv });
+    try {
+      await e.analyse(fen, Number(ui.anaTime.value) * 1000, info => {
+        if (stale()) return;
+        analysis.lines[info.multipv - 1] = info;
+        scheduleRender();
+      });
+    } finally {
+      e.configure({ MultiPV: 1 });
+    }
+  }).then(() => {
+    if (stale()) return;
+    analysis.done = true;
+    renderAnalysis();
+  }, err => {
+    if (!stale()) setEditStatus(`Engine error: ${err?.message || err}`);
+  });
+}
+
+function formatScore(score) {
+  if (score.type === "mate") return `#${score.value}`;
+  return `${score.value >= 0 ? "+" : ""}${(score.value / 100).toFixed(2)}`;
+}
+
+/** SAN with move numbers for the first `max` moves of a UCI principal variation. */
+function pvToSan(fen, pv, max = 12) {
+  const chess = new Chess(fen);
+  const parts = [];
+  for (const uci of pv.slice(0, max)) {
+    const turn = chess.turn(), number = chess.moveNumber();
+    let move;
+    try {
+      move = chess.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
+    } catch {
+      break;
+    }
+    if (turn === "w") parts.push(`${number}. ${move.san}`);
+    else parts.push(parts.length ? move.san : `${number}… ${move.san}`);
+  }
+  return parts;
+}
+
+function renderAnalysis() {
+  const lines = (analysis?.lines || []).filter(Boolean);
+  const items = lines.map((line, i) => {
+    const score = whitePov(line.score, analysis.turn);
+    const li = document.createElement("li");
+    const badge = document.createElement("span");
+    badge.className = score.value < 0 ? "score black" : "score";
+    badge.textContent = formatScore(score);
+    const pv = document.createElement("span");
+    pv.className = "pv";
+    const [first, ...rest] = pvToSan(analysis.fen, line.pv);
+    const b = document.createElement("b");
+    b.textContent = first || "";
+    pv.append(b, rest.length ? " " + rest.join(" ") : "");
+    li.append(badge, pv);
+    li.onmouseenter = () => { hoverLine = i; redraw(); };
+    return li;
+  });
+  ui.anaList.replaceChildren(...items);
+  if (!analysis) {
+    ui.anaInfo.textContent = "";
+    return;
+  }
+  const best = lines[0];
+  const depth = Math.max(0, ...lines.map(l => l.depth));
+  ui.anaInfo.textContent = best
+    ? `Depth ${depth} · ${coach.name}${analysis.done ? "" : " · thinking…"} · eval from White's side`
+    : "Thinking…";
+  if (best) {
+    const side = analysis.turn === "w" ? "White" : "Black";
+    const score = whitePov(best.score, analysis.turn);
+    const san = pvToSan(analysis.fen, best.pv, 1)[0]?.replace(/^\d+(\.|…) /, "");
+    editEval = scoreToBar(score);
+    setEditStatus(`${side} to move — best move: ${san} (${formatScore(score)})`);
+    drawEvalBar();
+  }
+  redraw();
+}
+
+function editPoint(e) {
+  const point = canvasPoint(e);
+  return { point, square: squareAt(point.x, point.y) };
+}
+
+function samePiece(piece, tool) {
+  return piece && piece.color + piece.type === tool;
+}
+
+function paint(square) {
+  if (paintTool === "erase") {
+    if (!editPieces[square]) return;
+    delete editPieces[square];
+  } else {
+    if (samePiece(editPieces[square], paintTool)) return;
+    editPieces[square] = { color: paintTool[0], type: paintTool[1] };
+  }
+  positionEdited();
+}
+
+function onEditPress(e) {
+  if (e.button !== 0) return;
+  const { point, square } = editPoint(e);
+  if (!square) return;
+  ui.canvas.setPointerCapture(e.pointerId);
+  if (editTool === "move") {
+    const piece = editPieces[square];
+    if (piece) {
+      editDrag = { from: square, piece, x: point.x, y: point.y };
+      ui.canvas.style.cursor = "grabbing";
+      redraw();
+    }
+    return;
+  }
+  // Clicking a square that already holds the chosen piece clears it.
+  paintTool = editTool !== "erase" && samePiece(editPieces[square], editTool) ? "erase" : editTool;
+  paint(square);
+}
+
+function onEditMotion(e) {
+  const { point, square } = editPoint(e);
+  if (editDrag) {
+    editDrag.x = point.x;
+    editDrag.y = point.y;
+    redraw();
+  } else if (paintTool) {
+    if (square) paint(square);
+  } else {
+    const grab = editTool === "move" && square && editPieces[square];
+    ui.canvas.style.cursor = editTool === "move" ? (grab ? "grab" : "default") : "crosshair";
+  }
+}
+
+function onEditRelease(e) {
+  paintTool = null;
+  if (!editDrag) return;
+  const { square } = editPoint(e);
+  const { from, piece } = editDrag;
+  editDrag = null;
+  ui.canvas.style.cursor = "default";
+  if (square === from) {
+    redraw();
+    return;
+  }
+  delete editPieces[from];
+  if (square) editPieces[square] = piece;  // dropped off the board: removed
+  positionEdited();
+}
+
+function onEditContextMenu(e) {
+  if (mode !== "analyze") return;
+  e.preventDefault();
+  const { square } = editPoint(e);
+  if (square && editPieces[square]) {
+    delete editPieces[square];
+    positionEdited();
+  }
+}
+
+function playFromHere() {
+  const { fen, chess, error } = validateEdit();
+  if (error) {
+    setEditStatus(error);
+    return;
+  }
+  if (chess.isGameOver()) {
+    setEditStatus("That position is already over — there is nothing to play.");
+    return;
+  }
+  userColor = editTurn;
+  setMode("play");
+  startGame(fen);
+}
+
 // ---------------------------------------------------------------- export
 
 function buildPgn() {
-  const pgn = new Chess();
+  const pgn = new Chess(enginePosition().fen);  // sets the SetUp/FEN headers for custom positions
   const you = "You", engine = opponentLabel();
   const d = new Date();
   const pad = n => String(n).padStart(2, "0");
@@ -972,3 +1489,7 @@ async function copyText(text, message) {
 buildUi();
 loadPieceImages();
 newGame();
+if (mode === "analyze") {
+  mode = "play";
+  setMode("analyze");
+}
