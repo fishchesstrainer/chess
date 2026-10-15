@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chess Trainer</title>
+  <meta name="description" content="Play and train against Stockfish in your browser.">
+  <link rel="icon" type="image/png" href="pieces/maestro/wN.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <section class="board-area">
+      <div class="eval" id="eval" aria-label="Evaluation bar">
+        <div class="eval-white" id="evalWhite"></div>
+        <div class="eval-mid"></div>
+        <span class="eval-label" id="evalLabel">0.0</span>
+      </div>
+      <div class="board-wrap">
+        <canvas id="board" aria-label="Chess board"></canvas>
+        <div class="promo" id="promo" hidden>
+          <div class="promo-box" id="promoBox" role="dialog" aria-label="Promote to"></div>
+        </div>
+      </div>
+      <p class="status" id="status" role="status"></p>
+    </section>
+
+    <aside class="panel">
+      <header class="title">
+        <h1>Chess Trainer</h1>
+        <span class="engine" id="engineName">Loading Stockfish…</span>
+      </header>
+
+      <fieldset class="card">
+        <legend>Game</legend>
+        <div class="row">
+          <span>Play as:</span>
+          <label><input type="radio" name="playAs" value="white" checked> White</label>
+          <label><input type="radio" name="playAs" value="black"> Black</label>
+          <label><input type="radio" name="playAs" value="random"> Random</label>
+        </div>
+        <div class="buttons">
+          <button id="newGame" title="New game (N)">New game</button>
+          <button id="undo" title="Undo move (Z)">Undo move</button>
+          <button id="flip" title="Flip board (F)">Flip board</button>
+          <button id="savePgn">Save PGN…</button>
+          <button id="copyFen">Copy FEN</button>
+          <button id="copyPgn">Copy PGN</button>
+        </div>
+      </fieldset>
+
+      <fieldset class="card">
+        <legend>Stockfish strength</legend>
+        <label class="slider">
+          <span>Skill level (0 = weakest, 20 = full): <output id="oppLevelOut">5</output></span>
+          <input type="range" id="oppLevel" min="0" max="20" value="5">
+        </label>
+        <div class="row">
+          <label><input type="checkbox" id="oppLimit"> Limit to Elo</label>
+          <input type="number" id="oppElo" min="1320" max="3190" step="50" value="1500" disabled>
+        </div>
+        <div class="row">
+          <label for="thinkTime">Think time (s):</label>
+          <select id="thinkTime">
+            <option>0.1</option><option>0.3</option><option selected>0.5</option>
+            <option>1</option><option>2</option><option>5</option>
+          </select>
+        </div>
+      </fieldset>
+
+      <fieldset class="card">
+        <legend>Appearance</legend>
+        <div class="grid2">
+          <label for="pieceSet">Pieces:</label>
+          <select id="pieceSet"></select>
+          <label for="theme">Board:</label>
+          <select id="theme"></select>
+        </div>
+      </fieldset>
+
+      <fieldset class="card">
+        <legend>Training</legend>
+        <button id="hint" class="primary" title="Hint (H)">Hint</button>
+        <label class="slider">
+          <span>Hint strength (20 = best move): <output id="hintLevelOut">20</output></span>
+          <input type="range" id="hintLevel" min="0" max="20" value="20">
+        </label>
+        <div class="row">
+          <label><input type="checkbox" id="hintLimit"> Limit to Elo</label>
+          <input type="number" id="hintElo" min="1320" max="3190" step="50" value="2000" disabled>
+        </div>
+        <label class="check"><input type="checkbox" id="showEval" checked> Show evaluation bar</label>
+        <label class="check"><input type="checkbox" id="showMoves" checked> Show legal moves</label>
+      </fieldset>
+
+      <fieldset class="card moves-card">
+        <legend>Moves</legend>
+        <ol class="moves" id="moves"></ol>
+      </fieldset>
+
+      <p class="keys">Shortcuts: <kbd>N</kbd> new game · <kbd>Z</kbd> undo · <kbd>H</kbd> hint · <kbd>F</kbd> flip</p>
+    </aside>
+  </main>
+
+  <dialog id="gameOver">
+    <form method="dialog">
+      <h2>Game over</h2>
+      <p id="gameOverText"></p>
+      <div class="buttons">
+        <button value="new" class="primary">New game</button>
+        <button value="close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
