@@ -382,6 +382,12 @@ kbd {
 /* ---------------------------------------------------------- read from image */
 
 .image-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.watch { display: flex; gap: 10px; align-items: flex-start; margin-top: 8px; }
+.watch[hidden] { display: none; }
+#watchCanvas { width: 120px; height: 120px; border-radius: 4px; background: #000; flex: none; }
+.watch-info { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+#watchFen { font-size: 12px; overflow-wrap: anywhere; }
+.watch-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
 body.dropping .board-wrap { outline: 3px dashed var(--accent); outline-offset: 4px; }
 
 .image-dialog { width: min(760px, calc(100vw - 32px)); }

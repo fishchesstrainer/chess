@@ -251,6 +251,13 @@ const ui = {
   imageFlipped: $("imageFlipped"),
   imageUse: $("imageUse"),
   imageFile: $("imageFile"),
+  watchPanel: $("watchPanel"),
+  watchCanvas: $("watchCanvas"),
+  watchVideo: $("watchVideo"),
+  watchFen: $("watchFen"),
+  watchTime: $("watchTime"),
+  watchMsg: $("watchMsg"),
+  watchFollow: $("watchFollow"),
 };
 const ctx = ui.canvas.getContext("2d");
 let sq = 0;  // square size in canvas pixels
@@ -343,9 +350,21 @@ function buildUi() {
   ui.imageCanvas.addEventListener("pointermove", onImageMotion);
   ui.imageCanvas.addEventListener("pointerup", onImageRelease);
   ui.imageDialog.addEventListener("close", () => {
-    if (ui.imageDialog.returnValue === "use") applyImageResult();
+    const read = imageRead;
     imageRead = null;
+    const use = ui.imageDialog.returnValue === "use";
+    if (read?.watchSetup) {
+      if (use && read.result) startWatching(read);
+      else if (!watch?.board) stopWatch();      // cancelled before watching started
+    } else if (use) {
+      applyImageResult(read);
+    }
   });
+  $("watchScreen").onclick = () => startWatch("screen");
+  $("watchCamera").onclick = () => startWatch("camera");
+  $("watchStop").onclick = stopWatch;
+  $("watchAdjust").onclick = () => watch && openImageDialog(vision.grabFrame(watch.video), true);
+  $("watchCopy").onclick = () => watch?.fen && navigator.clipboard?.writeText(watch.fen);
 
   ui.canvas.addEventListener("pointerdown", e => (mode === "play" ? onPress : onEditPress)(e));
   ui.canvas.addEventListener("pointermove", e => (mode === "play" ? onMotion : onEditMotion)(e));
@@ -1469,19 +1488,28 @@ function onDrop(e) {
 async function readFromImage(blob) {
   if (!blob?.type?.startsWith("image/")) return;
   setMode("analyze");
+  let image;
   try {
     vision ??= await import("./vision.js");
-    const image = await vision.loadImage(blob);
-    // Keep a canvas copy of the picture for drawing the preview.
-    const source = document.createElement("canvas");
-    source.width = image.width;
-    source.height = image.height;
-    source.getContext("2d").putImageData(image, 0, 0);
-    imageRead = { image, source, board: null, result: null, drawing: null, corner: -1 };
+    image = await vision.loadImage(blob);
   } catch (err) {
     setEditStatus(`Couldn't read that image: ${err.message}`);
     return;
   }
+  openImageDialog(image);
+}
+
+/** Show the image dialog for a picture: find the board, read it, let the user check it.
+ *  watchSetup: the picture is the first frame of a watched screen/camera. */
+async function openImageDialog(image, watchSetup = false) {
+  setMode("analyze");
+  // Keep a canvas copy of the picture for drawing the preview.
+  const source = document.createElement("canvas");
+  source.width = image.width;
+  source.height = image.height;
+  source.getContext("2d").putImageData(image, 0, 0);
+  imageRead = { image, source, board: null, result: null, drawing: null, corner: -1, watchSetup };
+  ui.imageUse.textContent = watchSetup ? `Start watching (every ${WATCH_SECONDS} s)` : "Use this position";
   const read = imageRead;
   const scale = Math.min(1, 1400 / Math.max(read.image.width, read.image.height));
   ui.imageCanvas.width = Math.round(read.image.width * scale);
@@ -1651,13 +1679,137 @@ function onImageRelease() {
   recognise();
 }
 
-function applyImageResult() {
-  const result = imageRead?.result;
+function applyImageResult(read = imageRead) {
+  const result = read?.result;
   if (!result) return;
   const flippedBoard = ui.imageFlipped.checked;
   const turn = document.querySelector("input[name=imageTurn]:checked").value;
   editFlipped = flippedBoard;  // show the position the way the picture did
   loadEditFen(`${vision.placementFen(result.grid, flippedBoard)} ${turn} KQkq - 0 1`);
+}
+
+// --------------------------------------------------- watch a window or camera
+// The board is found once (in the image dialog); after that only the pieces are read again,
+// every WATCH_SECONDS, from the same place in the picture.
+
+const WATCH_SECONDS = 10;
+let watch = null;   // {stream, video, board, flipped, turn, grid, fen, next, timer, busy}
+
+async function startWatch(kind) {
+  stopWatch();
+  let stream;
+  try {
+    vision ??= await import("./vision.js");
+    stream = kind === "screen"
+      ? await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+      : await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "environment" }, audio: false });
+  } catch (err) {
+    setEditStatus(`Couldn't start ${kind === "screen" ? "screen sharing" : "the camera"}: ${err.message}`);
+    return;
+  }
+  const video = ui.watchVideo;
+  video.srcObject = stream;
+  watch = { stream, video, board: null };
+  stream.getVideoTracks()[0].addEventListener("ended", stopWatch);   // "Stop sharing" in the browser
+  try {
+    await video.play();
+    for (let i = 0; i < 100 && !video.videoWidth; i++) await new Promise(r => setTimeout(r, 50));
+    await new Promise(r => setTimeout(r, 300));   // the first frames are often blank
+  } catch (err) {
+    setEditStatus(`Couldn't show the video: ${err.message}`);
+    stopWatch();
+    return;
+  }
+  if (!watch || !video.videoWidth) return;
+  openImageDialog(vision.grabFrame(video), true);
+}
+
+/** The image dialog was confirmed: remember the board and read it every WATCH_SECONDS. */
+function startWatching(read) {
+  if (!watch) return;
+  clearInterval(watch.timer);
+  watch.board = read.board;
+  watch.flipped = ui.imageFlipped.checked;
+  watch.turn = document.querySelector("input[name=imageTurn]:checked").value;
+  watch.grid = read.result.grid;
+  watch.fen = null;
+  ui.watchPanel.hidden = false;
+  showWatchResult(read.result.grid, watch.turn);
+  watch.next = Date.now() + WATCH_SECONDS * 1000;
+  watch.timer = setInterval(watchTick, 1000);
+  watchTick();
+}
+
+async function watchTick() {
+  const w = watch;
+  if (!w?.board) return;
+  drawWatchPreview();
+  const left = Math.ceil((w.next - Date.now()) / 1000);
+  if (w.busy || left > 0) {
+    ui.watchMsg.textContent = w.busy ? "Reading…" : `Next read in ${left} s`;
+    return;
+  }
+  w.busy = true;
+  ui.watchMsg.textContent = "Reading…";
+  try {
+    const result = await vision.readBoard(vision.grabFrame(w.video), w.board);
+    if (w !== watch) return;
+    w.turn = moverTurn(w.grid, result.grid) ?? w.turn;
+    w.grid = result.grid;
+    showWatchResult(result.grid, w.turn);
+  } catch (err) {
+    ui.watchMsg.textContent = `Couldn't read the board: ${err.message}`;
+  } finally {
+    w.busy = false;
+    w.next = Date.now() + WATCH_SECONDS * 1000;
+  }
+}
+
+/** Side to move after a change: the opposite of the colour whose pieces appeared on new squares. */
+function moverTurn(before, after) {
+  const colors = new Set();
+  after.forEach((cells, r) => cells.forEach((code, c) => {
+    if (code && code !== before[r][c]) colors.add(code[0]);
+  }));
+  return colors.size === 1 ? (colors.has("w") ? "b" : "w") : null;
+}
+
+function showWatchResult(grid, turn) {
+  const fen = `${vision.placementFen(grid, watch.flipped)} ${turn} - - 0 1`;
+  ui.watchTime.textContent = `read at ${new Date().toLocaleTimeString()}`;
+  if (fen === watch.fen) return;
+  watch.fen = fen;
+  ui.watchFen.textContent = fen;
+  if (ui.watchFollow.checked && mode === "analyze") {
+    editFlipped = watch.flipped;   // show the position the way the picture does
+    loadEditFen(fen);
+  }
+}
+
+/** Small live view of the watched picture with the board's outline. */
+function drawWatchPreview() {
+  const { video, board } = watch;
+  const c = ui.watchCanvas, g = c.getContext("2d"), k = c.width / vision.IMAGE_SIZE;
+  const r = vision.fitRect(video.videoWidth, video.videoHeight);
+  g.fillStyle = "#000";
+  g.fillRect(0, 0, c.width, c.height);
+  g.drawImage(video, r.x * k, r.y * k, r.w * k, r.h * k);
+  g.strokeStyle = "#3bd13b";
+  g.lineWidth = 2;
+  g.beginPath();
+  board.corners.forEach(([x, y], i) => (i ? g.lineTo(x * k, y * k) : g.moveTo(x * k, y * k)));
+  g.closePath();
+  g.stroke();
+}
+
+function stopWatch() {
+  if (!watch) return;
+  clearInterval(watch.timer);
+  watch.stream.getTracks().forEach(t => t.stop());
+  watch.video.srcObject = null;
+  watch = null;
+  ui.watchPanel.hidden = true;
 }
 
 function playFromHere() {

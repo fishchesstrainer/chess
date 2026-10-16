@@ -23,16 +23,32 @@ export const IMAGE_SIZE = 640;  // every picture is read at IMAGE_SIZE × IMAGE_
  */
 export async function loadImage(blob) {
   const bitmap = await createImageBitmap(blob);
+  const image = fitToSquare(bitmap, bitmap.width, bitmap.height);
+  bitmap.close?.();
+  return image;
+}
+
+/** The current frame of a playing <video>, prepared like loadImage(). */
+export function grabFrame(video) {
+  return fitToSquare(video, video.videoWidth, video.videoHeight);
+}
+
+/** Where a width × height picture lands in the IMAGE_SIZE square: {x, y, w, h}. */
+export function fitRect(width, height) {
+  const scale = IMAGE_SIZE / Math.max(width, height);
+  const w = Math.round(width * scale), h = Math.round(height * scale);
+  return { x: Math.floor((IMAGE_SIZE - w) / 2), y: Math.floor((IMAGE_SIZE - h) / 2), w, h };
+}
+
+function fitToSquare(source, width, height) {
   const canvas = document.createElement("canvas");
   canvas.width = canvas.height = IMAGE_SIZE;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
-  const scale = IMAGE_SIZE / Math.max(bitmap.width, bitmap.height);
-  const w = Math.round(bitmap.width * scale), h = Math.round(bitmap.height * scale);
+  const r = fitRect(width, height);
   ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(bitmap, Math.floor((IMAGE_SIZE - w) / 2), Math.floor((IMAGE_SIZE - h) / 2), w, h);
-  bitmap.close?.();
+  ctx.drawImage(source, r.x, r.y, r.w, r.h);
   return ctx.getImageData(0, 0, IMAGE_SIZE, IMAGE_SIZE);
 }
 

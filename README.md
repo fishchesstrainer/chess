@@ -78,7 +78,11 @@ No server: it all runs in the browser. The picture is first scaled to fit 640×6
    and shrunk to 32×32. A small neural network then names it: empty or one of the 12 pieces. The
    network was trained on 33 piece styles; its weights are in `vision/piece_cnn.json` and
    `vision/piece_cnn.bin` (141 KB). Squares it is unsure about are shown in orange.
-3. **Guess the rest.** If White's pieces sit mostly at the top, the board is assumed to be seen
+3. **Watch a window or camera** ("Watch a window…" / "Watch camera…" in the Analyze tab). The
+   board is found once on the first frame, which you can check and adjust. After that, only the
+   pieces are read again every 10 s at that same place; the latest FEN is shown and the board
+   follows it. The side to move is taken from which colour just moved.
+4. **Guess the rest.** If White's pieces sit mostly at the top, the board is assumed to be seen
    from Black's side. The side to move comes from a last-move highlight, when there is one.
 
 The detector and the network are trained and exported from the Python code in the parent

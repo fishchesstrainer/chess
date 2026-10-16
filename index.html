@@ -107,6 +107,26 @@
             <span class="muted">or paste a screenshot (Ctrl+V) or drop an image here</span>
             <input type="file" id="imageFile" accept="image/*" hidden>
           </div>
+          <div class="image-row">
+            <button id="watchScreen">Watch a window…</button>
+            <button id="watchCamera">Watch camera…</button>
+            <span class="muted">reads the board again every 10 s</span>
+          </div>
+          <div class="watch" id="watchPanel" hidden>
+            <canvas id="watchCanvas" width="200" height="200"></canvas>
+            <div class="watch-info">
+              <div><b>Latest FEN</b> <span class="muted" id="watchTime"></span></div>
+              <code id="watchFen"></code>
+              <div class="muted" id="watchMsg"></div>
+              <label><input type="checkbox" id="watchFollow" checked> Show it on the board</label>
+              <div class="watch-buttons">
+                <button id="watchCopy">Copy FEN</button>
+                <button id="watchAdjust">Adjust board…</button>
+                <button id="watchStop">Stop</button>
+              </div>
+            </div>
+            <video id="watchVideo" muted playsinline hidden></video>
+          </div>
           <div class="palette" id="palette"></div>
           <p class="muted">Pick a piece and click squares to place it (click again to remove).
             With <b>Move</b>, drag pieces around; drag one off the board or right-click it to remove it.</p>
