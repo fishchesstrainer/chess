@@ -15,16 +15,25 @@ let modelPromise = null;
 
 // ------------------------------------------------------------------ pixels
 
-/** Decode an image File/Blob into {data, width, height} (RGBA). */
+export const IMAGE_SIZE = 640;  // every picture is read at IMAGE_SIZE × IMAGE_SIZE
+
+/**
+ * Decode an image File/Blob into {data, width, height} (RGBA), scaled to fit IMAGE_SIZE ×
+ * IMAGE_SIZE without distortion and centred on black.
+ */
 export async function loadImage(blob) {
   const bitmap = await createImageBitmap(blob);
   const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
+  canvas.width = canvas.height = IMAGE_SIZE;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  ctx.drawImage(bitmap, 0, 0);
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, IMAGE_SIZE, IMAGE_SIZE);
+  const scale = IMAGE_SIZE / Math.max(bitmap.width, bitmap.height);
+  const w = Math.round(bitmap.width * scale), h = Math.round(bitmap.height * scale);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bitmap, Math.floor((IMAGE_SIZE - w) / 2), Math.floor((IMAGE_SIZE - h) / 2), w, h);
   bitmap.close?.();
-  return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  return ctx.getImageData(0, 0, IMAGE_SIZE, IMAGE_SIZE);
 }
 
 /** Split RGBA data into float planes [r, g, b, luminance]. */

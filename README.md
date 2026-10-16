@@ -68,7 +68,7 @@ browser cache. The choice is remembered.
 
 ## How "Read from image" works
 
-No server: it all runs in the browser.
+No server: it all runs in the browser. The picture is first scaled to fit 640×640 (proportions kept, centred on black).
 
 1. **Find the board** (`vision/board.js`). Works on photos taken at an angle as well as screenshots.
    It finds the points where four squares meet, fits a grid to them, and keeps the 8×8 placement
