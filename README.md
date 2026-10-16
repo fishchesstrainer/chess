@@ -1,6 +1,6 @@
 # Chess Trainer
 
-Play and train against Stockfish in your browser: **https://hraeichess.github.io/chess/**
+Play and train against Stockfish in your browser: **[https://fishchesstrainer.github.io/chess/]**
 
 A static web app (no server, no build step). Stockfish 19 runs locally in your browser as
 WebAssembly, so it works offline once loaded and nothing is sent anywhere.
