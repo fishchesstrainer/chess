@@ -68,27 +68,21 @@ browser cache. The choice is remembered.
 
 ## How "Read from image" works
 
-No machine learning and no server — it all runs in the browser in a fraction of a second:
+No server: it all runs in the browser.
 
-1. **Find the board.** On a checkerboard every line between two files (or ranks) separates
-   different colours along the whole board, so the picture is scanned for 7–9 long, evenly
-   spaced edge lines in each direction.
-2. **Recognise each square.** Every square is compared with the 12 pieces of 33 piece styles
-   (`vision/templates.png`), each pasted onto that square's own background colour (so
-   highlighted squares and white-on-light pieces compare fairly).
-3. **Use the whole board.** Squares that look identical (the same piece on the same shade) are
-   labelled together, and chess rules keep the counts plausible: one king per side, at most 8
-   pawns and never on the first or last rank, normally no more than two rooks, bishops or knights.
-4. **Guess the rest.** The board is assumed to be seen from Black's side if White's pieces sit
-   mostly at the top; the side to move comes from a last-move highlight when there is one.
+1. **Find the board** (`vision/board.js`). Works on photos taken at an angle as well as screenshots.
+   It finds the points where four squares meet, fits a grid to them, and keeps the 8×8 placement
+   that looks most like a checkerboard. The older screenshot detector in `vision.js` adds one more
+   candidate. If the grid is off, drag its corners or drag a box around the board.
+2. **Read each square** (`vision/cnn.js`). Each of the 64 squares is straightened, turned to gray
+   and shrunk to 32×32. A small neural network then names it: empty or one of the 12 pieces. The
+   network was trained on 33 piece styles; its weights are in `vision/piece_cnn.json` and
+   `vision/piece_cnn.bin` (141 KB). Squares it is unsure about are shown in orange.
+3. **Guess the rest.** If White's pieces sit mostly at the top, the board is assumed to be seen
+   from Black's side. The side to move comes from a last-move highlight, when there is one.
 
-Measured on test boards: the board was found in every image (including full-page screenshots
-and textured boards) and the orientation was always right; squares were read correctly 99% of
-the time for styles in the templates and about 92% for styles it has never seen. Misread squares
-are fixed in the editor with a click.
-
-To add a piece style, put its 12 images in a folder and add it to `tools/make_templates.py`, then
-rerun that script (CPU only, a few seconds).
+The detector and the network are trained and exported from the Python code in the parent
+workspace (`vision/train_pieces.py`, `vision/export_web_model.py`).
 
 ## Licences
 

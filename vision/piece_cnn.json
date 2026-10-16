@@ -1,0 +1,83 @@
+{
+ "size": 32,
+ "mean": 0.5,
+ "std": 0.25,
+ "classes": [
+  ".",
+  "P",
+  "N",
+  "B",
+  "R",
+  "Q",
+  "K",
+  "p",
+  "n",
+  "b",
+  "r",
+  "q",
+  "k"
+ ],
+ "layers": [
+  {
+   "type": "conv",
+   "cin": 1,
+   "cout": 16,
+   "w": 0,
+   "b": 144
+  },
+  {
+   "type": "conv",
+   "cin": 16,
+   "cout": 16,
+   "w": 160,
+   "b": 2464
+  },
+  {
+   "type": "maxpool"
+  },
+  {
+   "type": "conv",
+   "cin": 16,
+   "cout": 32,
+   "w": 2480,
+   "b": 7088
+  },
+  {
+   "type": "conv",
+   "cin": 32,
+   "cout": 32,
+   "w": 7120,
+   "b": 16336
+  },
+  {
+   "type": "maxpool"
+  },
+  {
+   "type": "conv",
+   "cin": 32,
+   "cout": 64,
+   "w": 16368,
+   "b": 34800
+  },
+  {
+   "type": "conv",
+   "cin": 64,
+   "cout": 64,
+   "w": 34864,
+   "b": 71728
+  },
+  {
+   "type": "maxpool"
+  },
+  {
+   "type": "gap"
+  },
+  {
+   "type": "dense",
+   "cin": 64,
+   "cout": 13,
+   "w": 71792,
+   "b": 72624
+  }
+ ]
+}

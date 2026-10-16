@@ -1477,25 +1477,38 @@ async function readFromImage(blob) {
     source.width = image.width;
     source.height = image.height;
     source.getContext("2d").putImageData(image, 0, 0);
-    imageRead = { image, source, box: vision.detectBoard(image), result: null, drawing: null };
+    imageRead = { image, source, board: null, result: null, drawing: null, corner: -1 };
   } catch (err) {
     setEditStatus(`Couldn't read that image: ${err.message}`);
     return;
   }
-  const scale = Math.min(1, 1400 / Math.max(imageRead.image.width, imageRead.image.height));
-  ui.imageCanvas.width = Math.round(imageRead.image.width * scale);
-  ui.imageCanvas.height = Math.round(imageRead.image.height * scale);
-  ui.imageMsg.textContent = "Reading the board…";
+  const read = imageRead;
+  const scale = Math.min(1, 1400 / Math.max(read.image.width, read.image.height));
+  ui.imageCanvas.width = Math.round(read.image.width * scale);
+  ui.imageCanvas.height = Math.round(read.image.height * scale);
+  ui.imageMsg.textContent = "Finding the board…";
   ui.imageUse.disabled = true;
   ui.imageDialog.returnValue = "";
   if (!ui.imageDialog.open) ui.imageDialog.showModal();
   drawImagePreview();
+  await nextPaint();
+  read.board = vision.detectBoard(read.image);
+  if (read !== imageRead) return;
+  drawImagePreview();
   await recognise();
 }
 
+/** Let the browser repaint before a long computation. */
+const nextPaint = () => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+
 async function recognise() {
   const read = imageRead;
-  const result = read.box ? await vision.readBoard(read.image, read.box) : null;
+  read.result = null;
+  ui.imageUse.disabled = true;
+  ui.imageMsg.textContent = "Reading the board…";
+  drawImagePreview();
+  await nextPaint();
+  const result = read.board ? await vision.readBoard(read.image, read.board) : null;
   if (read !== imageRead) return;
   read.result = result;
   if (result) {
@@ -1504,8 +1517,8 @@ async function recognise() {
   }
   ui.imageUse.disabled = !result;
   ui.imageMsg.textContent = result
-    ? "Check the letters against the picture. If the grid is off, drag a box around the board's 64 squares. " +
-      "Orange squares are uncertain; you can fix any mistake in the editor afterwards."
+    ? "Check the letters against the picture. If the grid is off, drag its corners, or drag a box around " +
+      "the board's 64 squares. Orange squares are uncertain; you can fix any mistake in the editor afterwards."
     : "Couldn't find a board in this picture. Drag a box around the board's 64 squares.";
   drawImagePreview();
 }
@@ -1527,33 +1540,46 @@ function drawImagePreview() {
     g.setLineDash([]);
     return;
   }
-  if (!read.box) return;
-  const x0 = read.box.x * k, y0 = read.box.y * k, cw = read.box.w * k / 8, ch = read.box.h * k / 8;
+  if (!read.board) return;
+  const at = (x, y) => vision.boardPoint(read.board, x, y).map(v => v * k);
+  const path = points => {
+    g.beginPath();
+    points.forEach(([x, y], i) => (i ? g.lineTo(x, y) : g.moveTo(x, y)));
+  };
   g.strokeStyle = "rgba(21, 120, 27, 0.9)";
   g.lineWidth = line;
   for (let i = 0; i <= 8; i++) {
-    g.beginPath();
-    g.moveTo(x0 + i * cw, y0);
-    g.lineTo(x0 + i * cw, y0 + 8 * ch);
-    g.moveTo(x0, y0 + i * ch);
-    g.lineTo(x0 + 8 * cw, y0 + i * ch);
+    path([at(i, 0), at(i, 8)]);
+    g.stroke();
+    path([at(0, i), at(8, i)]);
     g.stroke();
   }
+  // corner handles (drag to adjust the grid)
+  g.fillStyle = "rgba(21, 120, 27, 0.9)";
+  for (const [x, y] of read.board.corners) {
+    g.beginPath();
+    g.arc(x * k, y * k, 5 * line, 0, 2 * Math.PI);
+    g.fill();
+  }
   if (!read.result) return;
-  const r = Math.min(cw, ch) * 0.2;
-  g.font = `bold ${r * 1.3}px system-ui, sans-serif`;
   g.textAlign = "center";
   g.textBaseline = "middle";
   read.result.grid.forEach((cells, row) => cells.forEach((code, col) => {
-    const x = x0 + col * cw, y = y0 + row * ch;
-    if (read.result.confidence[row][col] < 0.15) {
+    const quad = [at(col, row), at(col + 1, row), at(col + 1, row + 1), at(col, row + 1)];
+    if (read.result.confidence[row][col] < 0.6) {
+      const inset = (p, f) => [p[0] + (quad[0][0] + quad[2][0]) / 2 * f - p[0] * f, p[1] + (quad[0][1] + quad[2][1]) / 2 * f - p[1] * f];
+      path(quad.map(p => inset(p, 0.08)));
+      g.closePath();
       g.strokeStyle = "#ff9800";
       g.lineWidth = 3 * line;
-      g.strokeRect(x + 1.5 * line, y + 1.5 * line, cw - 3 * line, ch - 3 * line);
+      g.stroke();
     }
     if (!code) return;
     // A badge in the corner: white letter on black for Black's pieces, and vice versa.
-    const bx = x + r + 2 * line, by = y + r + 2 * line;
+    const r = 0.2 * Math.min(Math.hypot(quad[1][0] - quad[0][0], quad[1][1] - quad[0][1]),
+      Math.hypot(quad[3][0] - quad[0][0], quad[3][1] - quad[0][1]));
+    const [bx, by] = at(col + 0.25, row + 0.25);
+    g.font = `bold ${r * 1.3}px system-ui, sans-serif`;
     g.beginPath();
     g.arc(bx, by, r, 0, 2 * Math.PI);
     g.fillStyle = code[0] === "w" ? "#ffffff" : "#222222";
@@ -1569,35 +1595,59 @@ function drawImagePreview() {
 function imagePoint(e) {
   const rect = ui.imageCanvas.getBoundingClientRect();
   const scale = imageRead.image.width / rect.width;
-  return { x: (e.clientX - rect.left) * scale, y: (e.clientY - rect.top) * scale };
+  return { x: (e.clientX - rect.left) * scale, y: (e.clientY - rect.top) * scale, scale };
 }
 
 function onImagePress(e) {
   if (!imageRead || e.button !== 0) return;
   ui.imageCanvas.setPointerCapture(e.pointerId);
   const p = imagePoint(e);
+  // Near a corner of the grid: drag that corner; elsewhere: draw a new box.
+  const corners = imageRead.board?.corners || [];
+  const near = corners.map(([x, y]) => Math.hypot(x - p.x, y - p.y) / p.scale);
+  const i = near.indexOf(Math.min(...near));
+  if (i >= 0 && near[i] < 16) {
+    imageRead.corner = i;
+    return;
+  }
   imageRead.anchor = p;
   imageRead.drawing = { x: p.x, y: p.y, w: 0, h: 0 };
 }
 
 function onImageMotion(e) {
-  if (!imageRead?.drawing) return;
-  const p = imagePoint(e), a = imageRead.anchor;
-  imageRead.drawing = { x: Math.min(a.x, p.x), y: Math.min(a.y, p.y), w: Math.abs(p.x - a.x), h: Math.abs(p.y - a.y) };
+  const read = imageRead;
+  if (!read) return;
+  const p = imagePoint(e);
+  if (read.corner >= 0) {
+    const corners = read.board.corners.map(c => c.slice());
+    corners[read.corner] = [p.x, p.y];
+    read.board = { corners };
+    read.result = null;
+    drawImagePreview();
+    return;
+  }
+  if (!read.drawing) return;
+  const a = read.anchor;
+  read.drawing = { x: Math.min(a.x, p.x), y: Math.min(a.y, p.y), w: Math.abs(p.x - a.x), h: Math.abs(p.y - a.y) };
   drawImagePreview();
 }
 
 function onImageRelease() {
   const read = imageRead;
-  if (!read?.drawing) return;
+  if (!read) return;
+  if (read.corner >= 0) {
+    read.corner = -1;
+    recognise();
+    return;
+  }
+  if (!read.drawing) return;
   const box = read.drawing;
   read.drawing = null;
   if (box.w < 16 || box.h < 16) {
     drawImagePreview();
     return;
   }
-  read.box = box;
-  ui.imageMsg.textContent = "Reading the board…";
+  read.board = vision.boardFromBox(box);
   recognise();
 }
 

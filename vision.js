@@ -1,19 +1,17 @@
-// Read a chess position from a picture of a 2D board (a screenshot or a diagram).
+// Read a chess position from a picture: a photo of a board at any angle, a screenshot or a diagram.
 //
-// No machine learning:
-// 1. The board is found from the lines between squares: on a checkerboard every
-//    boundary between two files (or ranks) separates different colours along the whole
-//    board, so we look for 7-9 long, evenly spaced edge lines in each direction.
-// 2. Each square is compared with many piece sets (vision/templates.png, built by
-//    tools/make_templates.py), each piece composited onto that square's own background
-//    colour, and the closest match (or "empty") wins.
+// 1. Find the board (vision/board.js, a port of the Python detector in the workspace's vision/):
+//    X-corners where four squares meet -> grid hypotheses -> the 8x8 placement that looks most
+//    like a checkerboard. The older detector for flat screenshots (long, evenly spaced edge
+//    lines) is kept below and its box competes as one more candidate.
+// 2. Cut out the 64 squares (warp at 64 px per square, grayscale, 32x32) and classify each
+//    with a small CNN (vision/cnn.js, weights in vision/piece_cnn.*, trained on 33 piece styles).
 
-const N = 32;                   // squares are compared at N×N pixels
-const SCALES = [0.8, 0.9, 1];   // piece size as a fraction of the square
-const INNER = 3;                // ignore this many pixels at the square edges (coordinates, misalignment)
-const DETECT_SIZE = 1200;       // longest side used for board detection
+import { detectBoard as detectQuad, cutSquares, boardHomography, apply } from "./vision/board.js";
+import { loadModel, classify } from "./vision/cnn.js";
 
-let templatesPromise = null;
+const DETECT_SIZE = 1200;       // longest side used by the screenshot detector
+let modelPromise = null;
 
 // ------------------------------------------------------------------ pixels
 
@@ -42,57 +40,39 @@ function planes({ data, width, height }) {
   return { r, g, b, y, width, height };
 }
 
-/**
- * Area-average resample of the rectangle (x0, y0, w, h) of each plane to N×N.
- * Pixels outside the image are clamped to the edge, or treated as 0 when zeroOutside is set.
- */
-function resample(planeList, width, height, x0, y0, w, h, zeroOutside = false) {
-  const weights = (start, size, limit) => {
-    const step = size / N, list = [];
-    for (let i = 0; i < N; i++) {
-      const a = start + i * step, b = a + step, taps = [];
-      for (let p = Math.floor(a); p < b; p++) {
-        const overlap = Math.min(b, p + 1) - Math.max(a, p);
-        if (overlap <= 0) continue;
-        const inside = p >= 0 && p < limit;
-        if (!inside && zeroOutside) continue;
-        taps.push([Math.min(limit - 1, Math.max(0, p)), overlap / step]);
-      }
-      list.push(taps);
-    }
-    return list;
-  };
-  const cols = weights(x0, w, width), rows = weights(y0, h, height);
-  return planeList.map(plane => {
-    const out = new Float32Array(N * N);
-    for (let i = 0; i < N; i++) {
-      for (let j = 0; j < N; j++) {
-        let sum = 0;
-        for (const [y, wy] of rows[i]) {
-          const base = y * width;
-          for (const [x, wx] of cols[j]) sum += plane[base + x] * wy * wx;
-        }
-        out[i * N + j] = sum;
-      }
-    }
-    return out;
-  });
-}
-
 // ------------------------------------------------------------- detection
 
-/** Find the board; returns {x, y, w, h} in image pixels, or null. */
+/**
+ * Find the board; returns {corners: [[x, y] x 4]} in image pixels (clockwise from the top-left
+ * corner of the board as seen), or null.
+ */
 export function detectBoard(image) {
+  const box = detectScreenshotBox(image);
+  const found = detectQuad(image, box ? [box] : []);
+  if (found) return { corners: found.corners };
+  // A tightly cropped, almost square picture is probably just the board.
+  const ratio = image.width / image.height;
+  if (ratio > 0.95 && ratio < 1.05) return boardFromBox({ x: 0, y: 0, w: image.width, h: image.height });
+  return null;
+}
+
+/** A board given by an axis-aligned box {x, y, w, h}. */
+export function boardFromBox({ x, y, w, h }) {
+  return { corners: [[x, y], [x + w, y], [x + w, y + h], [x, y + h]] };
+}
+
+/** Image position of board coordinates (x, y), each 0..8 (0, 0 = corners[0]). */
+export function boardPoint(board, x, y) {
+  board.H ??= boardHomography(board.corners);
+  return apply(board.H, x, y);
+}
+
+/** The flat-screenshot detector: box {x, y, w, h} of a board drawn axis-aligned, or null. */
+function detectScreenshotBox(image) {
   const scale = Math.min(1, DETECT_SIZE / Math.max(image.width, image.height));
   const small = scale < 1 ? downscale(image, scale) : image;
   const found = detectGrid(planes(small));
-  if (found) {
-    return { x: found.x / scale, y: found.y / scale, w: found.w / scale, h: found.h / scale };
-  }
-  // A tightly cropped, almost square picture is probably just the board.
-  const ratio = image.width / image.height;
-  if (ratio > 0.95 && ratio < 1.05) return { x: 0, y: 0, w: image.width, h: image.height };
-  return null;
+  return found && { x: found.x / scale, y: found.y / scale, w: found.w / scale, h: found.h / scale };
 }
 
 function downscale(image, scale) {
@@ -248,240 +228,48 @@ function fitGrid(lines, start, end) {
   return { origin, step };
 }
 
-// ------------------------------------------------------------- templates
+// ------------------------------------------------------------- recognition
 
-/** Load vision/templates.png: one row per piece set, one cell per piece. */
-function loadTemplates() {
-  templatesPromise ??= (async () => {
-    const meta = await (await fetch(new URL("vision/templates.json", import.meta.url))).json();
-    const img = new Image();
-    img.src = new URL("vision/templates.png", import.meta.url).href;
-    await img.decode();
-    const canvas = document.createElement("canvas");
-    canvas.width = img.naturalWidth;
-    canvas.height = img.naturalHeight;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0);
-    const size = meta.cell, templates = [];
-    meta.sets.forEach((set, row) => meta.codes.forEach((code, col) => {
-      const { data } = ctx.getImageData(col * size, row * size, size, size);
-      const alpha = new Float32Array(size * size), lum = new Float32Array(size * size);
-      for (let i = 0, j = 0; i < alpha.length; i++, j += 4) {
-        alpha[i] = data[j + 3] / 255;
-        lum[i] = alpha[i] * (0.299 * data[j] + 0.587 * data[j + 1] + 0.114 * data[j + 2]);
-      }
-      // The piece fills `scale` of the square, centred: sample a larger window around it.
-      for (const scale of SCALES) {
-        const window = size / scale, offset = (size - window) / 2;
-        const [a, v] = resample([alpha, lum], size, size, offset, offset, window, window, true);
-        templates.push({ set, code, scale, a, v });
-      }
-    }));
-    return templates;
+function loadPieceModel() {
+  modelPromise ??= (async () => {
+    const [meta, bin] = await Promise.all([
+      fetch(new URL("vision/piece_cnn.json", import.meta.url)).then(r => r.json()),
+      fetch(new URL("vision/piece_cnn.bin", import.meta.url)).then(r => r.arrayBuffer()),
+    ]);
+    return loadModel(meta, bin);
   })();
-  return templatesPromise;
+  return modelPromise;
 }
 
-// ------------------------------------------------------------ recognition
-
-/** Median of the pixels of a plane in a ring just inside the square's edge. */
-function ringMedian(plane) {
-  const values = [];
-  for (let i = 1; i < N - 1; i++) {
-    for (let j = 1; j < N - 1; j++) {
-      if (i <= 2 || i >= N - 3 || j <= 2 || j >= N - 3) values.push(plane[i * N + j]);
-    }
-  }
-  values.sort((a, b) => a - b);
-  return values[values.length >> 1];
-}
-
-/** Sum of squared differences between the square and template t (shifted by dx, dy) on background bg. */
-function distance(x, bg, t, dx, dy, limit) {
-  let d = 0;
-  for (let i = INNER; i < N - INNER; i++) {
-    const ti = i - dy;
-    for (let j = INNER; j < N - INNER; j++) {
-      const tj = j - dx;
-      let expected = bg;
-      if (ti >= 0 && ti < N && tj >= 0 && tj < N) {
-        const k = ti * N + tj;
-        expected = t.v[k] + (1 - t.a[k]) * bg;
-      }
-      const e = expected - x[i * N + j];
-      d += e * e;
-    }
-    if (d > limit) return d;
-  }
-  return d;
-}
-
-function emptyDistance(x, bg) {
-  let d = 0;
-  for (let i = INNER; i < N - INNER; i++) {
-    for (let j = INNER; j < N - INNER; j++) {
-      const e = bg - x[i * N + j];
-      d += e * e;
-    }
-  }
-  return d;
-}
-
-/** Distance from the square to every piece code ("" = empty), each minimised over sets, sizes and shifts. */
-function matchSquare(lum, bg, templates) {
-  const empty = emptyDistance(lum, bg);
-  const byCode = { "": empty };
-  // Every template as is, then the closest few again shifted by up to a pixel.
-  let best = empty;
-  const coarse = templates.map(t => {
-    const d = distance(lum, bg, t, 0, 0, best * 4);
-    best = Math.min(best, d);
-    byCode[t.code] = Math.min(byCode[t.code] ?? Infinity, d);
-    return [d, t];
-  }).sort((a, b) => a[0] - b[0]);
-  for (const [, t] of coarse.slice(0, 16)) {
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        if (dx || dy) byCode[t.code] = Math.min(byCode[t.code], distance(lum, bg, t, dx, dy, byCode[t.code]));
-      }
-    }
-  }
-  return byCode;
-}
-
-/** Share of the square's inner pixels that differ clearly from its background. */
-function foreground(lum, bg) {
-  let count = 0, total = 0;
-  for (let i = INNER; i < N - INNER; i++) {
-    for (let j = INNER; j < N - INNER; j++) {
-      total++;
-      if (Math.abs(lum[i * N + j] - bg) > 24) count++;
-    }
-  }
-  return count / total;
-}
-
-/** How different two squares look (0 = identical), allowing a one-pixel shift. */
-function squareDifference(a, b) {
-  let best = Infinity;
-  for (let dy = -1; dy <= 1; dy++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      let d = 0;
-      for (let i = INNER; i < N - INNER; i++) {
-        for (let j = INNER; j < N - INNER; j++) {
-          const e = (a.lum[i * N + j] - a.bg) - (b.lum[(i + dy) * N + j + dx] - b.bg);
-          d += e * e;
-        }
-      }
-      best = Math.min(best, d);
-    }
-  }
-  return best / Math.max(1, Math.min(a.energy, b.energy));
-}
-
-const PIECE_CODES = ["wP", "wN", "wB", "wR", "wQ", "wK", "bP", "bN", "bB", "bR", "bQ", "bK"];
-const USUAL_MAX = { P: 8, N: 2, B: 2, R: 2, Q: 1, K: 1 };
-
-/** Penalty for piece counts no real game (or hardly any) has. */
-function rulePenalty(groups, labels) {
-  const count = {};
-  let penalty = 0;
-  groups.forEach((group, i) => {
-    const code = labels[i];
-    if (!code) return;
-    count[code] = (count[code] || 0) + group.squares.length;
-    if (code[1] === "P" && group.squares.some(s => s.row === 0 || s.row === 7)) penalty += 1e6;
-  });
-  for (const color of "wb") {
-    const kings = count[color + "K"] || 0;
-    penalty += 4 * Math.abs(kings - 1);
-    if ((count[color + "P"] || 0) > 8) penalty += 4 * (count[color + "P"] - 8);
-    for (const type of "NBRQ") penalty += 1.5 * Math.max(0, (count[color + type] || 0) - USUAL_MAX[type]);
-  }
-  return penalty;
-}
+const CODE = { P: "wP", N: "wN", B: "wB", R: "wR", Q: "wQ", K: "wK", p: "bP", n: "bN", b: "bB", r: "bR", q: "bQ", k: "bK" };
 
 /**
- * Recognise the board inside box {x, y, w, h} of an image.
+ * Recognise the pieces on a board {corners} found in the image.
  * Returns {grid, confidence, flipped, turn}: grid[row][col] is "" or a code such as "wN",
- * as displayed (row 0 at the top); flipped and turn are guesses.
+ * as displayed (row 0 at the top); confidence is the model's probability; flipped and turn
+ * are guesses.
  */
-export async function readBoard(image, box, { sets } = {}) {
-  let templates = await loadTemplates();
-  if (sets) templates = templates.filter(t => sets.includes(t.set));
-  const all = planes(image);
-  const step = box.w / 8, stepY = box.h / 8;
-  const squares = [];
-  for (let row = 0; row < 8; row++) {
-    for (let col = 0; col < 8; col++) {
-      const [r, g, b, lum] = resample([all.r, all.g, all.b, all.y], all.width, all.height,
-        box.x + col * step, box.y + row * stepY, step, stepY);
-      const bg = ringMedian(lum);
-      const dist = matchSquare(lum, bg, templates);
-      // Cost of each code relative to the best one (0 = best), on a log scale.
-      const best = Math.min(...Object.values(dist));
-      const cost = Object.fromEntries(Object.entries(dist).map(([code, d]) => [code, Math.log((d + 1) / (best + 1))]));
-      const fg = foreground(lum, bg);
-      // Almost no foreground can't be a piece. Plenty of it is a piece even if no template
-      // says so, provided an identical square elsewhere confirms it (see below), since
-      // arrows and other markings also add foreground.
-      const occupied = fg >= 0.04 && (cost[""] > 0 || fg > 0.3);
-      const doubtful = !occupied && fg > 0.12;
-      squares.push({ row, col, lum, bg, cost, occupied, doubtful, energy: dist[""],
-        ring: [ringMedian(r), ringMedian(g), ringMedian(b)] });
-    }
-  }
-
-  // Group occupied squares that look identical (same piece on the same shade of square).
-  let groups = [];
-  for (const sq of squares.filter(s => s.occupied || s.doubtful)) {
-    const group = groups.find(g => (g.squares[0].row + g.squares[0].col) % 2 === (sq.row + sq.col) % 2 &&
-      squareDifference(g.squares[0], sq) < 0.12);
-    if (group) group.squares.push(sq);
-    else groups.push({ squares: [sq] });
-  }
-  groups = groups.filter(g => g.squares.length > 1 || g.squares[0].occupied);
-  for (const group of groups) {
-    group.cost = Object.fromEntries(PIECE_CODES.map(code => [code, group.squares.reduce((s, q) => s + q.cost[code], 0)]));
-  }
-
-  // Label the groups: best template match, adjusted so that piece counts stay plausible.
-  const labels = groups.map(g => PIECE_CODES.reduce((a, b) => (g.cost[a] <= g.cost[b] ? a : b)));
-  const total = () => groups.reduce((s, g, i) => s + g.cost[labels[i]], 0) + rulePenalty(groups, labels);
-  for (let round = 0; round < 10; round++) {
-    let changed = false;
-    groups.forEach((group, i) => {
-      let bestCode = labels[i], bestTotal = total();
-      for (const code of PIECE_CODES) {
-        labels[i] = code;
-        const t = total();
-        if (t < bestTotal - 1e-9) {
-          bestTotal = t;
-          bestCode = code;
-        }
-      }
-      if (labels[i] !== bestCode) changed = true;
-      labels[i] = bestCode;
-    });
-    if (!changed) break;
-  }
-
+export async function readBoard(image, board) {
+  const model = await loadPieceModel();
+  const { pixels, rings } = cutSquares(image, board.corners);
   const grid = [...Array(8)].map(() => Array(8).fill(""));
   const confidence = [...Array(8)].map(() => Array(8).fill(1));
   const ring = [...Array(8)].map(() => Array(8));
-  for (const sq of squares) {
-    ring[sq.row][sq.col] = sq.ring;
-    // Confidence: how clearly the best piece beats the runner-up (or empty vs. piece).
-    const sorted = Object.values(sq.cost).sort((a, b) => a - b);
-    confidence[sq.row][sq.col] = Math.min(1, sorted[1] * 2);
+  const classes = model.meta.classes, n = classes.length;
+  for (let row = 0; row < 8; row++) {
+    // one rank at a time, giving the page a chance to repaint in between
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const probs = classify(model, pixels.subarray(row * 8 * 1024, (row + 1) * 8 * 1024), 8);
+    for (let col = 0; col < 8; col++) {
+      const p = probs.subarray(col * n, (col + 1) * n);
+      let best = 0;
+      for (let k = 1; k < n; k++) if (p[k] > p[best]) best = k;
+      grid[row][col] = classes[best] === "." ? "" : CODE[classes[best]];
+      confidence[row][col] = p[best];
+      ring[row][col] = rings[row * 8 + col];
+    }
   }
-  groups.forEach((group, i) => group.squares.forEach(sq => {
-    grid[sq.row][sq.col] = labels[i];
-    const others = PIECE_CODES.filter(c => c !== labels[i]).map(c => sq.cost[c] - sq.cost[labels[i]]);
-    confidence[sq.row][sq.col] = Math.max(0, Math.min(1, Math.min(...others) * 2, group.squares.length > 1 ? 1 : 0.6));
-  }));
-  const flipped = guessFlipped(grid);
-  return { grid, confidence, flipped, turn: guessTurn(grid, ring) };
+  return { grid, confidence, flipped: guessFlipped(grid), turn: guessTurn(grid, ring) };
 }
 
 /** Viewed from Black's side if White's pieces sit mostly at the top. */
