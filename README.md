@@ -40,6 +40,18 @@ python3 -m http.server 8000
 
 ## Layout
 
+### iPhone Home Screen icon
+
+`apple-touch-icon.png` is the 180×180 PNG made from the supplied green pawn and graduation
+cap picture. `index.html` links it using `rel="apple-touch-icon"` with a relative URL so it
+also works under the GitHub Pages `/chess/` path.
+
+After publishing the updated files, open the website in Safari and choose **Share → Add to
+Home Screen**. If an existing shortcut still shows the old icon, remove that shortcut and
+add the website again.
+
+### Files
+
 | Path | What |
 |---|---|
 | `index.html`, `style.css`, `app.js` | The app |
